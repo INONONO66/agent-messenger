@@ -35,6 +35,7 @@ export async function sendAction(
     const message = await client.sendMessage(teamId, channelId, content, options.thread, format)
 
     const output = {
+      ...message,
       id: message.id,
       content: message.content,
       author: message.author.displayName,
@@ -73,6 +74,7 @@ export async function listAction(
     const messages = await client.getMessages(teamId, channelId, limit)
 
     const output = messages.map((msg: TeamsMessage) => ({
+      ...msg,
       id: msg.id,
       content: msg.content,
       html: msg.html,
@@ -114,6 +116,7 @@ export async function repliesAction(
     const replies = await client.getThreadReplies(teamId, channelId, messageId, limit)
 
     const output = replies.map((msg: TeamsMessage) => ({
+      ...msg,
       id: msg.id,
       content: msg.content,
       html: msg.html,
@@ -160,6 +163,7 @@ export async function searchAction(
     const results = await client.searchMessages(query, { limit: options.limit, from: options.from })
 
     const output = results.map((result) => ({
+      ...result,
       id: result.id,
       content: result.content,
       author: result.author.displayName,
@@ -226,6 +230,7 @@ export async function getAction(
     }
 
     const output = {
+      ...message,
       id: message.id,
       content: message.content,
       html: message.html,
