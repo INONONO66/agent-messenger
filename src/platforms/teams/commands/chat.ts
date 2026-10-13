@@ -73,6 +73,39 @@ export async function historyAction(chatId: string, options: { limit?: number; p
   }
 }
 
+export async function getAction(chatId: string, messageId: string, options: { pretty?: boolean }): Promise<void> {
+  try {
+    const credManager = new TeamsCredentialManager()
+    const cred = await credManager.getTokenWithExpiry()
+
+    if (!cred) {
+      console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty))
+      process.exit(1)
+    }
+
+    const client = await new TeamsClient().login({
+      token: cred.token,
+      tokenExpiresAt: cred.tokenExpiresAt,
+      accountType: cred.accountType,
+      region: cred.region,
+    })
+    const message = await client.getChatMessage(chatId, messageId)
+
+    const output = {
+      id: message.id,
+      author: message.author.displayName,
+      content: message.content,
+      html: message.html,
+      files: message.files,
+      timestamp: message.timestamp,
+    }
+
+    console.log(formatOutput(output, options.pretty))
+  } catch (error) {
+    handleError(error as Error)
+  }
+}
+
 export async function sendAction(
   chatId: string,
   content: string,
@@ -166,6 +199,14 @@ export const chatCommand = new Command('chat')
           pretty: options.pretty,
         })
       }),
+  )
+  .addCommand(
+    new Command('get')
+      .description('Get a single chat message')
+      .argument('<chat-id>', 'Chat ID')
+      .argument('<message-id>', 'Message ID')
+      .option('--pretty', 'Pretty print JSON output')
+      .action(getAction),
   )
   .addCommand(
     new Command('send')

@@ -692,6 +692,14 @@ export class TeamsClient {
       .map((msg) => toChatMessage(msg, chatId))
   }
 
+  async getChatMessage(chatId: string, messageId: string): Promise<TeamsMessage> {
+    const message = await this.request<RawChatMessage>(
+      'GET',
+      `/users/ME/conversations/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
+    )
+    return toChatMessage(message, chatId)
+  }
+
   async sendChatMessage(chatId: string, content: string, format: TeamsMessageFormat = 'text'): Promise<TeamsMessage> {
     interface SendResponse {
       OriginalArrivalTime?: number

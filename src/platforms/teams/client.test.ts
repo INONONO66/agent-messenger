@@ -333,6 +333,31 @@ describe('TeamsClient', () => {
     })
   })
 
+  describe('getChatMessage', () => {
+    it('fetches a single chat message by id', async () => {
+      mockResponse({
+        id: '1700000000000',
+        content: '<p>Hello &amp; welcome</p>',
+        imdisplayname: 'Alice',
+        composetime: '2024-01-01T00:00:00.000Z',
+        messagetype: 'RichText/Html',
+      })
+
+      const client = await new TeamsClient().login({ token: 'test-token', accountType: 'personal' })
+      const message = await client.getChatMessage('19:group@thread.v2', '1700000000000')
+
+      expect(fetchCalls[0].url).toBe(
+        'https://msgapi.teams.live.com/v1/users/ME/conversations/19%3Agroup%40thread.v2/messages/1700000000000',
+      )
+      expect(message).toMatchObject({
+        id: '1700000000000',
+        channel_id: '19:group@thread.v2',
+        content: 'Hello & welcome',
+        html: '<p>Hello &amp; welcome</p>',
+      })
+    })
+  })
+
   describe('sendChatMessage', () => {
     it('sends an HTML-escaped message to a chat', async () => {
       mockResponse({ OriginalArrivalTime: 1704067200000 })
