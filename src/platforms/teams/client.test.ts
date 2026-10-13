@@ -306,6 +306,31 @@ describe('TeamsClient', () => {
         'https://msgapi.teams.live.com/v1/users/ME/conversations/19%3A1on1%40unq.gbl.spaces/messages?startTime=0&view=msnp24Equivalent&pageSize=30',
       )
     })
+
+    it('exposes the raw html and downloadable files of rich messages', async () => {
+      const imageUrl = 'https://us-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo'
+      const attachmentUrl = 'https://contoso-my.sharepoint.com/personal/alice/Documents/report.pdf'
+      const html = `<p>See</p><img src="${imageUrl}" itemtype="http://schema.skype.com/AMSImage">`
+      mockResponse({
+        messages: [
+          {
+            id: 'm1',
+            content: html,
+            imdisplayname: 'Alice',
+            composetime: '2024-01-01T00:00:00.000Z',
+            messagetype: 'RichText/Html',
+            properties: { files: JSON.stringify([{ objectUrl: attachmentUrl }]) },
+          },
+        ],
+      })
+
+      const client = await new TeamsClient().login({ token: 'test-token', accountType: 'personal' })
+      const [message] = await client.getChatMessages('19:1on1@unq.gbl.spaces')
+
+      expect(message.content).toBe('See')
+      expect(message.html).toBe(html)
+      expect(message.files).toEqual([imageUrl, attachmentUrl])
+    })
   })
 
   describe('sendChatMessage', () => {
@@ -586,6 +611,43 @@ describe('TeamsClient', () => {
       expect(fetchCalls[0].url).toBe(
         'https://teams.microsoft.com/api/csa/emea/api/v2/teams/111/channels/ch1/messages?limit=50',
       )
+    })
+
+    it('splits html channel content into text and html', async () => {
+      mockResponse([
+        {
+          id: 'msg1',
+          channel_id: 'ch1',
+          author: { id: '123', displayName: 'User 1' },
+          content: '<p>Release <b>today</b></p>',
+          timestamp: '2024-01-01T00:00:00.000Z',
+        },
+      ])
+
+      const client = await new TeamsClient().login({ token: 'test-token', region: 'emea' })
+      const [message] = await client.getMessages('111', 'ch1')
+
+      expect(message.content).toBe('Release today')
+      expect(message.html).toBe('<p>Release <b>today</b></p>')
+    })
+
+    it('lists channel attachments from properties.files', async () => {
+      const attachmentUrl = 'https://contoso.sharepoint.com/sites/team/Shared%20Documents/plan.docx'
+      mockResponse([
+        {
+          id: 'msg1',
+          channel_id: 'ch1',
+          author: { id: '123', displayName: 'User 1' },
+          content: '<p>Plan attached</p>',
+          timestamp: '2024-01-01T00:00:00.000Z',
+          properties: { files: JSON.stringify([{ objectUrl: attachmentUrl }]) },
+        },
+      ])
+
+      const client = await new TeamsClient().login({ token: 'test-token', region: 'emea' })
+      const [message] = await client.getMessages('111', 'ch1')
+
+      expect(message.files).toEqual([attachmentUrl])
     })
 
     it('uses default limit of 50', async () => {

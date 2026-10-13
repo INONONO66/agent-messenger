@@ -7,6 +7,7 @@ import { escapeHtml, markdownToHtml } from '@/shared/utils/markdown-to-html'
 import { SUBSTRATE_SEARCH_URL } from './app-config'
 import { TeamsCredentialManager } from './credential-manager'
 import { sanitizeTeamsHtml } from './html-sanitizer'
+import { parseTeamsContent, teamsHtmlToText } from './message-content'
 import { TeamsTokenProvider } from './token-provider'
 import type {
   TeamsAccountType,
@@ -31,6 +32,7 @@ interface RateLimitBucket {
 interface RawTeamsMessage extends TeamsMessage {
   rootMessageId?: string
   parentMessageId?: string
+  properties?: unknown
 }
 
 type JsonRecord = Record<string, unknown>
@@ -56,19 +58,6 @@ function isPersonalToken(token: string): boolean {
   } catch {
     return false
   }
-}
-
-function stripHtml(content: string | undefined): string | undefined {
-  if (content === undefined) return undefined
-  const stripped = content.replace(/<[^>]*>/g, '')
-  return stripped
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -125,8 +114,9 @@ function parseSubstrateResult(value: unknown): TeamsSearchResult | null {
 
   return {
     id,
-    content:
-      stripHtml(resultString(value, ['content', 'Content', 'HitHighlightedSummary', 'Summary', 'Preview'])) ?? '',
+    content: teamsHtmlToText(
+      resultString(value, ['content', 'Content', 'HitHighlightedSummary', 'Summary', 'Preview']) ?? '',
+    ),
     author: {
       id: author ? (stringFrom(author, ['id', 'Id', 'ObjectId']) ?? '') : (propertyValue(value, ['AuthorId']) ?? ''),
       displayName: author
@@ -239,8 +229,36 @@ function formatContent(content: string, format: TeamsMessageFormat): string {
   return format === 'markdown' ? markdownToHtml(content) : escapeHtml(content)
 }
 
+interface RawChatMessage {
+  id: string
+  content?: string
+  from?: string
+  imdisplayname?: string
+  composetime?: string
+  originalarrivaltime?: string
+  messagetype?: string
+  properties?: unknown
+}
+
+function toChatMessage(message: RawChatMessage, chatId: string): TeamsMessage {
+  return {
+    id: message.id,
+    channel_id: chatId,
+    author: {
+      id: message.from ?? '',
+      displayName: message.imdisplayname ?? 'Unknown',
+    },
+    ...parseTeamsContent(message.content, { messagetype: message.messagetype, properties: message.properties }),
+    timestamp: message.composetime ?? message.originalarrivaltime ?? '',
+  }
+}
+
+function withParsedContent<T extends RawTeamsMessage>(message: T): T {
+  return { ...message, ...parseTeamsContent(message.content, { properties: message.properties }) }
+}
+
 function withThreadMetadata(message: RawTeamsMessage, rootMessageId?: string): TeamsMessage {
-  const { rootMessageId: messageRootMessageId, parentMessageId, ...teamsMessage } = message
+  const { rootMessageId: messageRootMessageId, parentMessageId, ...teamsMessage } = withParsedContent(message)
   const rawRootMessageId = rootMessageId ?? messageRootMessageId
   const isThreadReply = Boolean(
     rootMessageId ||
@@ -649,7 +667,7 @@ export class TeamsClient {
         id: conv.id,
         type,
         topic: conv.threadProperties?.topic,
-        last_message: stripHtml(conv.lastMessage?.content),
+        last_message: conv.lastMessage?.content === undefined ? undefined : teamsHtmlToText(conv.lastMessage.content),
         last_message_at: conv.lastMessage?.composetime ?? conv.lastMessage?.originalarrivaltime,
       })
     }
@@ -658,17 +676,8 @@ export class TeamsClient {
   }
 
   async getChatMessages(chatId: string, limit: number = 50): Promise<TeamsMessage[]> {
-    interface ChatMessage {
-      id: string
-      content?: string
-      from?: string
-      imdisplayname?: string
-      composetime?: string
-      originalarrivaltime?: string
-      messagetype?: string
-    }
     interface MessagesResponse {
-      messages: ChatMessage[]
+      messages: RawChatMessage[]
     }
     const encodedChatId = encodeURIComponent(chatId)
     const data = await this.request<MessagesResponse>(
@@ -680,16 +689,7 @@ export class TeamsClient {
     return (data.messages ?? [])
       .filter((msg) => !msg.messagetype || userMessageTypes.has(msg.messagetype))
       .slice(0, limit)
-      .map((msg) => ({
-        id: msg.id,
-        channel_id: chatId,
-        author: {
-          id: msg.from ?? '',
-          displayName: msg.imdisplayname ?? 'Unknown',
-        },
-        content: stripHtml(msg.content) ?? '',
-        timestamp: msg.composetime ?? msg.originalarrivaltime ?? '',
-      }))
+      .map((msg) => toChatMessage(msg, chatId))
   }
 
   async sendChatMessage(chatId: string, content: string, format: TeamsMessageFormat = 'text'): Promise<TeamsMessage> {
@@ -863,12 +863,13 @@ export class TeamsClient {
   }
 
   async getMessage(teamId: string, channelId: string, messageId: string): Promise<TeamsMessage> {
-    return this.request<TeamsMessage>(
+    const message = await this.request<RawTeamsMessage>(
       'GET',
       `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages/${messageId}`,
       undefined,
       CSA_API_BASE,
     )
+    return withParsedContent(message)
   }
 
   async deleteMessage(teamId: string, channelId: string, messageId: string): Promise<void> {
