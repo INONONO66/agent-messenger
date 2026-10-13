@@ -224,6 +224,34 @@ async function readDownloadResponse(response: Response, codePrefix: string): Pro
   return Buffer.from(await response.arrayBuffer())
 }
 
+function downloadFilename(response: Response, url: string): string {
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const encoded = disposition.match(/filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i)?.[1]
+  const quoted = disposition.match(/filename\s*=\s*"?([^";]+)"?/i)?.[1]
+  const fromHeader = encoded ? safeDecodeURIComponent(encoded.trim()) : quoted?.trim()
+  if (fromHeader) return basename(fromHeader.replace(/\\/g, '/'))
+
+  const { pathname } = new URL(url)
+  // AMS URLs end in `/views/<view>`; the object id is the meaningful part.
+  const amsObjectId = pathname.match(/\/objects\/([^/]+)/)?.[1]
+  if (amsObjectId) return `${amsObjectId}.${extensionFor(response.headers.get('content-type'))}`
+  return basename(safeDecodeURIComponent(pathname)) || 'download'
+}
+
+function extensionFor(contentType: string | null): string {
+  const subtype = contentType?.split(';')[0].split('/')[1]?.trim().toLowerCase()
+  if (!subtype) return 'bin'
+  return subtype === 'jpeg' ? 'jpg' : subtype.replace(/\+.*$/, '')
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 function formatContent(content: string, format: TeamsMessageFormat): string {
   if (format === 'html') return sanitizeTeamsHtml(content)
   return format === 'markdown' ? markdownToHtml(content) : escapeHtml(content)
@@ -947,14 +975,7 @@ export class TeamsClient {
 
     const source = getFileDownloadSource(file)
     if (source.route === 'graph') {
-      const graphToken = await new TeamsTokenProvider(this.credManager).getGraphToken()
-      const shareId = `u!${Buffer.from(source.url).toString('base64url').replace(/=+$/, '')}`
-      const response = await fetch(`${GRAPH_API_BASE}/shares/${shareId}/driveItem/content`, {
-        headers: {
-          Authorization: `Bearer ${graphToken}`,
-        },
-        redirect: 'follow',
-      })
+      const response = await this.fetchGraphShare(source.url)
       return { buffer: await readDownloadResponse(response, 'graph_download'), file }
     }
 
@@ -970,5 +991,39 @@ export class TeamsClient {
       redirect: 'follow',
     })
     return { buffer: await readDownloadResponse(response, 'skype_download'), file }
+  }
+
+  async downloadContent(url: string): Promise<{ data: Buffer; filename: string; contentType: string | null }> {
+    if (isSharePointOrOneDriveUrl(url)) {
+      const response = await this.fetchGraphShare(url)
+      const data = await readDownloadResponse(response, 'graph_download')
+      return { data, filename: downloadFilename(response, url), contentType: response.headers.get('content-type') }
+    }
+
+    if (!url.toLowerCase().startsWith('https://') || !isTrustedSkypeDownloadHost(url)) {
+      throw new TeamsError(`Refusing to download from an untrusted host: ${url}`, 'file_url_untrusted')
+    }
+    if (this.isTokenExpired()) {
+      throw new TeamsError('Token has expired. Run "auth login" or "auth extract" to refresh.', 'token_expired')
+    }
+    // AMS content (inline images) only accepts the `skype_token` scheme; a
+    // Bearer header or a bare X-Skypetoken is rejected with 401.
+    const response = await fetch(url, {
+      headers: { Authorization: `skype_token ${this.getToken()}` },
+      redirect: 'follow',
+    })
+    const data = await readDownloadResponse(response, 'skype_download')
+    return { data, filename: downloadFilename(response, url), contentType: response.headers.get('content-type') }
+  }
+
+  private async fetchGraphShare(url: string): Promise<Response> {
+    const graphToken = await new TeamsTokenProvider(this.credManager).getGraphToken()
+    const shareId = `u!${Buffer.from(url).toString('base64url').replace(/=+$/, '')}`
+    return fetch(`${GRAPH_API_BASE}/shares/${shareId}/driveItem/content`, {
+      headers: {
+        Authorization: `Bearer ${graphToken}`,
+      },
+      redirect: 'follow',
+    })
   }
 }
