@@ -62,6 +62,8 @@ export async function historyAction(chatId: string, options: { limit?: number; p
       id: msg.id,
       author: msg.author.displayName,
       content: msg.content,
+      html: msg.html,
+      files: msg.files,
       timestamp: msg.timestamp,
     }))
 

@@ -189,3 +189,25 @@ it('edit: rejects an invalid format', async () => {
     exitSpy.mockRestore()
   }
 })
+
+it('history: includes html and files for rich messages', async () => {
+  const consoleSpy = mock((_msg: string) => {})
+  console.log = consoleSpy
+  clientGetChatMessagesSpy.mockResolvedValue([
+    {
+      id: 'msg_123',
+      channel_id: '19:1on1@unq.gbl.spaces',
+      author: { id: 'user_789', displayName: 'Alice' },
+      content: 'See',
+      html: '<p>See</p>',
+      files: ['https://us-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo'],
+      timestamp: '2025-01-29T10:00:00Z',
+    },
+  ])
+
+  await historyAction('19:1on1@unq.gbl.spaces', { pretty: false })
+
+  const [message] = JSON.parse(consoleSpy.mock.calls[0][0])
+  expect(message.html).toBe('<p>See</p>')
+  expect(message.files).toEqual(['https://us-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo'])
+})
