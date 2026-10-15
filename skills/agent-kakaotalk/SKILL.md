@@ -438,6 +438,21 @@ Notes:
 - Filenames are preserved on the recipient side for `file` kind, used as a display label for `audio`, and ignored for `photo` / `video` (the client renders the bytes directly).
 - Each upload opens one fresh TCP+LOCO connection per attachment. Multi-photo opens N connections in parallel.
 
+#### Read Status
+
+The read-status API is SDK-only: `getReadWatermarks(chatId)` seeds each member's
+last-read `log_id`, and `computeReadStatus(...)` reports who has read a message.
+A member counts as having read it iff `watermark >= log_id`; always exclude the
+message sender (and any other caller-selected IDs) from the calculation.
+
+`getReadWatermarks` sends `CHATONROOM`, a room-entry call that may clear your own
+unread count (#315), and the server returns watermarks only on the first
+`CHATONROOM` for a chat in a session. Call it once per chat per LOCO session.
+The result is a snapshot the SDK never updates: store it yourself and advance
+each watermark from listener `read` events (`DECUNREAD` pushes), only ever
+forward. Do not poll `CHATONROOM`. On `disconnected`, drop the stored
+watermarks; after the reconnect you may seed each chat once again.
+
 #### Mark as Read
 
 `message mark-read` sends a LOCO `NOTIREAD` packet to advance the server-side read watermark for a chat. The watermark is a `log_id` — typically the latest message's `log_id` from `message list` — not a timestamp.
