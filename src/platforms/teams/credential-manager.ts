@@ -199,6 +199,15 @@ export class TeamsCredentialManager {
     await this.saveConfig(config)
   }
 
+  async cacheTeams(teams: Array<{ team_id: string; team_name: string }>): Promise<void> {
+    const config = await this.loadConfig()
+    if (!config) return
+    const account = this.resolveCurrentAccount(config)
+    if (!account) return
+    account.teams = Object.fromEntries(teams.map((team) => [team.team_id, team]))
+    await this.saveConfig(config)
+  }
+
   async getCurrentAccountType(): Promise<TeamsAccountType | null> {
     const config = await this.loadConfig()
     if (!config) return null
