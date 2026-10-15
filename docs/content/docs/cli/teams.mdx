@@ -20,7 +20,7 @@ agent-teams message send <team-id> <channel-id> "Hello from AI agent!"
 
 ## Authentication
 
-Use `auth login` for work/school channel, directory, search and file operations. These use Microsoft bearer tokens from the saved device-code account. `auth extract` supplies only a Skype token for chat operations. Your tenant policies and delegated permissions still apply.
+Use `auth login` for work/school channel, directory, search and Graph-backed file operations. These use Microsoft bearer tokens from the saved device-code account. `auth extract` supplies a Skype token for chats, legacy discovery and trusted Teams-hosted inline downloads. Your tenant policies and delegated permissions still apply.
 
 An expired device-code login is refreshed for the same account. If refresh fails, the CLI does not replace it with a different desktop/browser identity. Run `auth login` explicitly to reconnect.
 

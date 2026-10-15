@@ -217,11 +217,13 @@ agent-teams message send <team-id> <channel-id> "## Deploy done
 agent-teams message list <team-id> <channel-id>
 agent-teams message list <team-id> 19:abc123@thread.tacv2 --limit 50
 
-# Get a single message by ID
+# Get a single message by ID (add --thread for a reply)
 agent-teams message get <team-id> <channel-id> <message-id>
+agent-teams message get <team-id> <channel-id> <reply-id> --thread <root-message-id>
 
-# Delete a message
+# Delete a message (add --thread for a reply)
 agent-teams message delete <team-id> <channel-id> <message-id> --force
+agent-teams message delete <team-id> <channel-id> <reply-id> --thread <root-message-id> --force
 
 # Search messages across Teams (requires `auth login` — see Authentication)
 agent-teams message search <query>
@@ -252,8 +254,12 @@ For personal Microsoft accounts (`@outlook.com` / `@live.com`) that have no team
 # List 1:1, group, and self chats
 agent-teams chat list
 
-# Get chat message history
+# Get chat message history (follows pages, returns an array)
 agent-teams chat history <chat-id> --limit 100
+
+# Read one page at a time; returns { "messages": [...], "next_cursor": "..." }
+agent-teams chat history <chat-id> --page --limit 50
+agent-teams chat history <chat-id> --cursor "$NEXT_CURSOR" --limit 50
 
 # Get a single chat message
 agent-teams chat get <chat-id> <message-id>
@@ -278,6 +284,9 @@ Messages from `chat history`, `chat get`, `message list/get/replies`, and `chann
 - `content` — plain text (paragraphs as newlines, links as `text (url)`; numeric and common named entities such as `&amp;`, `&nbsp;`, `&mdash;` are decoded, rarer named entities stay literal)
 - `html` — the original HTML, only for rich-text messages; use it to see where images sit in the text
 - `files` — every downloadable URL in the message: inline images first (in order), then attachments
+- `raw_content`, `content_type`, `mentions`, `attachments`, `raw` — the server representation, kept alongside the rendered fields (not in `chat get`) (`edited_at`/`deleted_at` and thread fields appear on channel messages when set)
+
+`message search` results carry `id`, `channel_id`, `thread_id`, `author`, `content` (indexed preview), `timestamp`, optional `team_name`/`channel_name`/`permalink`, and the original Substrate result in `raw`.
 
 Download any `files` entry with `agent-teams file download <url> [output-path]`.
 
@@ -347,12 +356,14 @@ agent-teams user me
 ### Reaction Commands
 
 ```bash
-# Add reaction (use emoji name)
+# Add reaction (Unicode emoji, or like/heart/laugh/surprised/sad/angry)
 agent-teams reaction add <team-id> <channel-id> <message-id> <emoji>
 agent-teams reaction add <team-id> 19:abc123@thread.tacv2 1234567890 like
+agent-teams reaction add <team-id> <channel-id> <reply-id> 👍 --thread <root-message-id>
 
-# Remove reaction
+# Remove reaction (add --thread for a reply)
 agent-teams reaction remove <team-id> <channel-id> <message-id> <emoji>
+agent-teams reaction remove <team-id> <channel-id> <reply-id> like --thread <root-message-id>
 ```
 
 ### File Commands
@@ -415,9 +426,9 @@ With `--full`, returns comprehensive JSON with:
 
 ## Output Format
 
-Message reads retain `raw_content`, `content_type`, `mentions`, `attachments` and `raw` alongside rendered `content`. HTML source newlines after `<br>` do not create duplicate blank lines. Media and system records remain in chat history. Default history returns an array and follows pages; `chat history --page` or `--cursor` returns `{messages, next_cursor}` for resumable reads. Search returns indexed previews and `raw`; plain previews preserve literal angle brackets and entities. Use exact history/get for full source messages.
+Channel `message list/get/replies` and `chat history` retain `raw_content`, `content_type`, `mentions`, `attachments` and `raw` alongside rendered `content`. HTML source newlines after `<br>` do not create duplicate blank lines. Media and system records remain in chat history. Default history returns an array and follows pages; `chat history --page` or `--cursor` returns `{messages, next_cursor}` for resumable reads. Search returns indexed previews and `raw`; plain previews preserve literal angle brackets and entities. Use exact history/get for full source messages.
 
-Replies require `--thread <root-message-id>` for `message get`, `message delete`, `reaction add` and `reaction remove`. Reaction input accepts Unicode or the names `like`, `heart`, `laugh`, `surprised`, `sad`, `angry`. The client converts those names to Graph Unicode. Channel deletion reads the exact Graph target first, then uses Chat Service with the existing Skype token. It does not require adding Graph `ChannelMessage.ReadWrite`; Teams ownership and deletion policy still apply. An uncertain delete is not replayed or retried through another API.
+Replies require `--thread <root-message-id>` for `message get`, `message delete`, `reaction add` and `reaction remove`. Reaction input accepts Unicode or the names `like`, `heart`, `laugh`, `surprised`, `sad`, `angry`. The client converts those names to Graph Unicode. Channel deletion reads the exact Graph target first, then uses Chat Service with the existing Skype token. This avoids a Graph DELETE call, but Chat Service can still return 403 when the account lacks permission to delete the message; Teams ownership and deletion policy still apply. An uncertain delete is not replayed or retried through another API.
 
 GET requests retry transient rate limits/server errors. Search POST and mutations run once. A lost response or parse error can occur after a write succeeded. Preserve the attempt and inspect history before another send; do not put writes in automatic resend loops. The upstream CLI has no durable send ledger or server idempotency key.
 

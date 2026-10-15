@@ -105,7 +105,7 @@ To save a message's inline images and attachments, download each URL in its `fil
 
 ```bash
 agent-teams chat get "$CHAT_ID" "$MESSAGE_ID" | jq -r '.files // [] | .[]' | while read -r URL; do
-  agent-teams file download "$URL" ./downloads | jq -r '.path'
+  mkdir -p ./downloads && agent-teams file download "$URL" ./downloads | jq -r '.path'
 done
 ```
 

@@ -17,9 +17,9 @@ import { TeamsClient, TeamsCredentialManager, TeamsError } from 'agent-messenger
 
 Work/school channel, directory and file methods use Microsoft Graph with the existing `TeamsTokenProvider`. Sign in with `agent-teams auth login` first; an extracted Skype token alone cannot access these methods. Private/group chats continue to use the Skype messaging service. Tenant policies and permissions can restrict individual operations.
 
-The main client for interacting with Microsoft Teams' API programmatically. GET requests include rate-limit handling and backoff on server errors. Search uses a POST and is not automatically retried. Mutations are attempted once to avoid duplicate delivery after an ambiguous response.
+The main client for interacting with Microsoft Teams' API programmatically. Graph and Skype GET requests routed through the client request helpers include rate-limit handling and backoff on server errors; direct downloads are not retried. Search uses a POST and is not automatically retried. Mutations are attempted once to avoid duplicate delivery after an ambiguous response.
 
-Skype tokens are short-lived and their expiry is checked before Skype requests. `.login()` refreshes a stored device-code account; manually supplied SDK credentials remain a snapshot. For long-running SDK use, obtain fresh credentials at job boundaries. Graph/Substrate bearer tokens are minted and cached separately. If device-code refresh fails, reconnect explicitly with `auth login`; `auth extract` cannot repair Graph capabilities.
+Skype token expiry is checked before Skype requests only when `tokenExpiresAt` is supplied or `.login()` loads stored credentials. `.login()` refreshes a stored device-code account; manually supplied SDK credentials remain a snapshot. For long-running SDK use, obtain fresh credentials at job boundaries. Graph/Substrate bearer tokens are minted and cached separately. If device-code refresh fails, reconnect explicitly with `auth login`; `auth extract` cannot repair Graph capabilities.
 
 ```typescript
 import { TeamsClient } from 'agent-messenger/teams'
