@@ -395,6 +395,10 @@ agent-kakaotalk message send <chat-id> "Good point!" --reply-to 1234567890
 
 If the `log_id` is not found in the latest 100 messages, the command errors out without sending.
 
+In open chats (오픈채팅) the reply also carries the room's link id as `src_linkId`. The CLI resolves it on its own: from the login snapshot when the room is there, otherwise through a read-only `CHATINFO` lookup that does not change read state. You never pass `--link-id` for a reply. The open-chat reply bubble itself has not been checked against a live server yet.
+
+A send counts as delivered only when the server returns a non-zero `log_id`. A `WRITE` acknowledgment with `status_code: 0` but `log_id: "0"` is reported as `"success": false` and the process exits non-zero, because no message was created.
+
 #### Sending Attachments
 
 `message upload` sends photos, videos, audio, and arbitrary files to a chat. The CLI sniffs the MIME type from the filename and dispatches to the matching KakaoTalk message type, so the common case is a single command and a file path:
