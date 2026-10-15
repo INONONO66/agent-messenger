@@ -442,9 +442,12 @@ A member counts as having read it iff `watermark >= log_id`; always exclude the
 message sender (and any other caller-selected IDs) from the calculation.
 
 `getReadWatermarks` sends `CHATONROOM`, a room-entry call that may clear your own
-unread count (#315). Call it once per LOCO session, then rely on `DECUNREAD`
-`read` pushes to advance watermarks. Do not poll `CHATONROOM`; seed again only
-after the session reconnects.
+unread count (#315), and the server returns watermarks only on the first
+`CHATONROOM` for a chat in a session. Call it once per chat per LOCO session.
+The result is a snapshot the SDK never updates: store it yourself and advance
+each watermark from listener `read` events (`DECUNREAD` pushes), only ever
+forward. Do not poll `CHATONROOM`. On `disconnected`, drop the stored
+watermarks; after the reconnect you may seed each chat once again.
 
 #### Mark as Read
 
