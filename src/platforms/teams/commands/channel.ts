@@ -92,6 +92,7 @@ export async function historyAction(
 
     const output = messages.map((msg) => ({
       ...msg,
+      raw: undefined,
       id: msg.id,
       author: msg.author.displayName,
       content: msg.content,

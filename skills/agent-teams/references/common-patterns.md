@@ -72,9 +72,9 @@ agent-teams chat history "$CHAT_ID" --page --limit 50
 agent-teams chat history "$CHAT_ID" --cursor "$NEXT_CURSOR" --limit 50
 ```
 
-Default history returns an array and follows pages. `--page` or `--cursor` returns `{messages, next_cursor}`. Follow cursors until absent and persist your position for resumable collection. Chat media and system records are retained. `content` is rendered text; `raw_content`, `content_type`, `mentions`, `attachments` and `raw` retain the server representation. HTML source newlines after `<br>` do not add duplicate blank lines.
+Default history returns an array and follows pages. `--page` or `--cursor` returns `{messages, next_cursor}`. Follow cursors until absent and persist your position for resumable collection. Chat media records are retained; add `--include-system` for membership, call and other system records. `content` is rendered text; `raw_content`, `content_type`, `mentions` and `attachments` retain the server representation. HTML source newlines after `<br>` do not add duplicate blank lines.
 
-Search uses Substrate and returns indexed previews, with original results in `raw`. Plain previews preserve literal angle brackets and entities. Use exact history/get to retrieve the full source message. Search may lag newly sent messages.
+Search uses Substrate and returns indexed previews. Plain previews preserve literal angle brackets and entities. Use exact history/get to retrieve the full source message. Search may lag newly sent messages.
 
 ## Read-only polling
 

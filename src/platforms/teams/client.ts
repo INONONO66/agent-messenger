@@ -325,6 +325,11 @@ function toChatMessage(message: RawChatMessage, chatId: string): TeamsMessage {
   }
 }
 
+// Membership changes, call events and similar records; hidden from history unless requested.
+function isSystemMessageType(messagetype: string | undefined): boolean {
+  return /^(?:ThreadActivity|Event|Control)\//.test(messagetype ?? '')
+}
+
 function withCsaContent(message: RawTeamsMessage, rootMessageId?: string): TeamsMessage {
   const { rootMessageId: messageRootId, parentMessageId, properties, ...rest } = message
   const isThreadReply = Boolean(
@@ -754,7 +759,18 @@ export class TeamsClient {
     chatId: string,
     limit = 50,
     cursor?: string,
+    options: { includeSystem?: boolean } = {},
   ): Promise<{ messages: TeamsMessage[]; next_cursor?: string }> {
+    const { messages, next_cursor } = await this.fetchChatMessagesPage(chatId, limit, cursor, options)
+    return { messages, next_cursor }
+  }
+
+  private async fetchChatMessagesPage(
+    chatId: string,
+    limit: number,
+    cursor: string | undefined,
+    options: { includeSystem?: boolean },
+  ): Promise<{ messages: TeamsMessage[]; next_cursor?: string; fetched: number }> {
     if (!Number.isSafeInteger(limit) || limit < 1)
       throw new TeamsError('Limit must be a positive integer.', 'invalid_pagination')
     const encodedChatId = encodeURIComponent(chatId)
@@ -771,20 +787,28 @@ export class TeamsClient {
       path = url.pathname.replace(/^\/v1/, '') + url.search
     }
     const page = await this.request<{ messages: RawChatMessage[]; _metadata?: { backwardLink?: string } }>('GET', path)
+    const fetched = page.messages ?? []
     return {
-      messages: (page.messages ?? []).map((raw) => toChatMessage(raw, chatId)),
+      messages: fetched
+        .filter((raw) => options.includeSystem || !isSystemMessageType(raw.messagetype))
+        .map((raw) => toChatMessage(raw, chatId)),
       next_cursor: page._metadata?.backwardLink || undefined,
+      fetched: fetched.length,
     }
   }
 
-  async getChatMessages(chatId: string, limit = 50): Promise<TeamsMessage[]> {
+  async getChatMessages(
+    chatId: string,
+    limit = 50,
+    options: { includeSystem?: boolean } = {},
+  ): Promise<TeamsMessage[]> {
     const messages: TeamsMessage[] = [],
       seen = new Set<string>()
     let cursor: string | undefined
     do {
-      const page = await this.getChatMessagesPage(chatId, limit - messages.length, cursor)
+      const page = await this.fetchChatMessagesPage(chatId, limit - messages.length, cursor, options)
       messages.push(...page.messages.slice(0, limit - messages.length))
-      if (page.messages.length === 0) break
+      if (page.fetched === 0) break
       cursor = page.next_cursor
       if (cursor && seen.has(cursor)) throw new TeamsError('Repeated message pagination cursor.', 'repeated_pagination')
       if (cursor) seen.add(cursor)

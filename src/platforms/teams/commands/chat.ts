@@ -41,7 +41,7 @@ export async function listAction(options: { pretty?: boolean }): Promise<void> {
 
 export async function historyAction(
   chatId: string,
-  options: { limit?: number; pretty?: boolean; page?: boolean; cursor?: string },
+  options: { limit?: number; pretty?: boolean; page?: boolean; cursor?: string; includeSystem?: boolean },
 ): Promise<void> {
   try {
     const credManager = new TeamsCredentialManager()
@@ -60,11 +60,15 @@ export async function historyAction(
     })
     const limit = options.limit && options.limit > 0 ? options.limit : 50
     const page =
-      options.page || options.cursor ? await client.getChatMessagesPage(chatId, limit, options.cursor) : undefined
-    const messages = page?.messages ?? (await client.getChatMessages(chatId, limit))
+      options.page || options.cursor
+        ? await client.getChatMessagesPage(chatId, limit, options.cursor, { includeSystem: options.includeSystem })
+        : undefined
+    const messages =
+      page?.messages ?? (await client.getChatMessages(chatId, limit, { includeSystem: options.includeSystem }))
 
     const output = messages.map((msg) => ({
       ...msg,
+      raw: undefined,
       id: msg.id,
       author: msg.author.displayName,
       content: msg.content,
@@ -138,6 +142,7 @@ export async function sendAction(
 
     const output = {
       ...message,
+      raw: undefined,
       id: message.id,
       content: message.content,
       timestamp: message.timestamp,
@@ -176,6 +181,7 @@ export async function editAction(
 
     const output = {
       ...message,
+      raw: undefined,
       id: message.id,
       content: message.content,
       timestamp: message.timestamp,
@@ -202,6 +208,7 @@ export const chatCommand = new Command('chat')
       .option('--limit <n>', 'Number of messages to fetch', '50')
       .option('--page', 'Return one archive page with next_cursor')
       .option('--cursor <url>', 'Continue from a returned archive cursor')
+      .option('--include-system', 'Include membership, call and other system records')
       .option('--pretty', 'Pretty print JSON output')
       .action((chatId, options) => {
         return historyAction(chatId, {
@@ -209,6 +216,7 @@ export const chatCommand = new Command('chat')
           pretty: options.pretty,
           page: options.page,
           cursor: options.cursor,
+          includeSystem: options.includeSystem,
         })
       }),
   )

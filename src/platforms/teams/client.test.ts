@@ -286,7 +286,7 @@ describe('TeamsClient', () => {
   })
 
   describe('getChatMessages', () => {
-    it('returns user messages and retains system events', async () => {
+    it('returns user messages and hides system events unless requested', async () => {
       mockResponse({
         messages: [
           {
@@ -310,7 +310,7 @@ describe('TeamsClient', () => {
       const client = await new TeamsClient().login({ token: 'test-token', accountType: 'personal' })
       const messages = await client.getChatMessages('19:1on1@unq.gbl.spaces', 30)
 
-      expect(messages).toHaveLength(2)
+      expect(messages).toHaveLength(1)
       expect(messages[0].id).toBe('m1')
       expect(messages[0].content).toBe('Hello')
       expect(messages[0].author.displayName).toBe('Alice')
@@ -318,6 +318,12 @@ describe('TeamsClient', () => {
       expect(fetchCalls[0].url).toBe(
         'https://msgapi.teams.live.com/v1/users/ME/conversations/19%3A1on1%40unq.gbl.spaces/messages?startTime=0&view=msnp24Equivalent&pageSize=30',
       )
+
+      mockResponse({
+        messages: [{ id: 'm2', content: 'Bob joined', messagetype: 'ThreadActivity/AddMember' }],
+      })
+      const withSystem = await client.getChatMessages('19:1on1@unq.gbl.spaces', 30, { includeSystem: true })
+      expect(withSystem.map((message) => message.id)).toEqual(['m2'])
     })
 
     it('exposes the raw html and downloadable files of rich messages', async () => {
