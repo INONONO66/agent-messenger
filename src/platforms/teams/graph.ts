@@ -1,30 +1,10 @@
-import { parseTeamsContent } from './message-content'
+import { parseTeamsContent, teamsHtmlToText } from './message-content'
 import type { TeamsChannel, TeamsFile, TeamsMessage, TeamsTeam, TeamsUser } from './types'
 import { TeamsError } from './types'
 
 type RecordValue = Record<string, any>
 const BASE = 'https://graph.microsoft.com/v1.0'
 export const segment = (value: string): string => encodeURIComponent(value)
-
-// Render text for agents while retaining the untouched server body separately.
-export function messageText(html: string): string {
-  return html
-    .replace(/<br\s*\/?\s*>(?:[ \t]*\r?\n)?/gi, '\n')
-    .replace(/<\/(?:p|div|li|h[1-6]|blockquote|pre)>\s*(?=<|$)/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(
-      /&(?:amp|lt|gt|quot|apos|nbsp|#39);/g,
-      (value) =>
-        ({ '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&nbsp;': ' ', '&#39;': "'" })[
-          value
-        ] ?? value,
-    )
-    .replace(/&#(x[\da-f]+|\d+);/gi, (value, code: string) => {
-      const number = code[0].toLowerCase() === 'x' ? parseInt(code.slice(1), 16) : Number(code)
-      return number <= 0x10ffff ? String.fromCodePoint(number) : value
-    })
-    .replace(/^\n|\n$/g, '')
-}
 
 export function graphMessage(raw: RecordValue, channelId: string, rootId?: string): TeamsMessage {
   const author = raw.from?.user ?? raw.from?.application ?? {}
@@ -39,7 +19,7 @@ export function graphMessage(raw: RecordValue, channelId: string, rootId?: strin
     id: raw.id,
     channel_id: channelId,
     author: { id: author.id ?? '', displayName: author.displayName ?? 'Unknown' },
-    content: raw.body?.contentType === 'text' ? (raw.body.content ?? '') : messageText(raw.body?.content ?? ''),
+    content: raw.body?.contentType === 'text' ? (raw.body.content ?? '') : teamsHtmlToText(raw.body?.content ?? ''),
     html: isHtml && raw.body?.content ? raw.body.content : undefined,
     files: files.length > 0 ? files : undefined,
     timestamp: raw.createdDateTime ?? '',
@@ -109,7 +89,15 @@ export class TeamsGraph {
         continue
       }
       if (response.status === 204) return undefined as T
-      const result = (await response.json().catch(() => ({}))) as RecordValue
+      const text = await response.text()
+      let result: RecordValue = {}
+      if (text.trim()) {
+        try {
+          result = JSON.parse(text)
+        } catch {
+          if (response.ok) throw new TeamsError('Graph returned invalid JSON.', 'graph_invalid_json')
+        }
+      }
       if (!response.ok)
         throw new TeamsError(
           result.error?.message ?? `HTTP ${response.status}`,

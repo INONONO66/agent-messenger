@@ -6,7 +6,7 @@ import { escapeHtml, markdownToHtml } from '@/shared/utils/markdown-to-html'
 
 import { SUBSTRATE_SEARCH_URL } from './app-config'
 import { TeamsCredentialManager } from './credential-manager'
-import { TeamsGraph, graphMessage, graphTeam, graphChannel, graphUser, graphFile, segment, messageText } from './graph'
+import { TeamsGraph, graphMessage, graphTeam, graphChannel, graphUser, graphFile, segment } from './graph'
 import { sanitizeTeamsHtml } from './html-sanitizer'
 import { parseTeamsContent, teamsHtmlToText } from './message-content'
 import { TeamsTokenProvider } from './token-provider'
@@ -135,8 +135,8 @@ function parseSubstrateResult(value: unknown): TeamsSearchResult | null {
   const preview = resultString(source, ['Preview', 'Summary'])
   const content =
     htmlContent !== undefined
-      ? messageText(htmlContent)
-      : (preview ?? messageText(resultString(value, ['HitHighlightedSummary']) ?? ''))
+      ? teamsHtmlToText(htmlContent)
+      : (preview ?? teamsHtmlToText(resultString(value, ['HitHighlightedSummary']) ?? ''))
   return {
     id,
     channel_id: channelId,
@@ -697,6 +697,7 @@ export class TeamsClient {
     const encodedChatId = encodeURIComponent(chatId)
     let path = `/users/ME/conversations/${encodedChatId}/messages?startTime=0&view=msnp24Equivalent&pageSize=${Math.min(limit, 100)}`
     if (cursor) {
+      if (!this.regionDiscovered) await this.discoverRegion()
       const url = new URL(cursor)
       if (
         url.origin !== new URL(this.getMsgApiBase()).origin ||
