@@ -706,10 +706,7 @@ export class TeamsClient {
       }
       path = url.pathname.replace(/^\/v1/, '') + url.search
     }
-    const page = await this.request<{ messages: RawChatMessage[]; _metadata?: { backwardLink?: string } }>(
-      'GET',
-      path,
-    )
+    const page = await this.request<{ messages: RawChatMessage[]; _metadata?: { backwardLink?: string } }>('GET', path)
     return {
       messages: (page.messages ?? []).map((raw) => toChatMessage(raw, chatId)),
       next_cursor: page._metadata?.backwardLink || undefined,

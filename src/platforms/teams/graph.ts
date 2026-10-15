@@ -1,3 +1,4 @@
+import { parseTeamsContent } from './message-content'
 import type { TeamsChannel, TeamsFile, TeamsMessage, TeamsTeam, TeamsUser } from './types'
 import { TeamsError } from './types'
 
@@ -28,11 +29,19 @@ export function messageText(html: string): string {
 export function graphMessage(raw: RecordValue, channelId: string, rootId?: string): TeamsMessage {
   const author = raw.from?.user ?? raw.from?.application ?? {}
   const replyId = rootId ?? raw.replyToId ?? undefined
+  const isHtml = raw.body?.contentType !== 'text'
+  const inlineFiles = isHtml ? (parseTeamsContent(raw.body?.content, { messagetype: 'RichText/Html' }).files ?? []) : []
+  const attachmentFiles = (raw.attachments ?? [])
+    .map((attachment: RecordValue) => attachment.contentUrl)
+    .filter(Boolean)
+  const files = [...inlineFiles, ...attachmentFiles]
   return {
     id: raw.id,
     channel_id: channelId,
     author: { id: author.id ?? '', displayName: author.displayName ?? 'Unknown' },
     content: raw.body?.contentType === 'text' ? (raw.body.content ?? '') : messageText(raw.body?.content ?? ''),
+    html: isHtml && raw.body?.content ? raw.body.content : undefined,
+    files: files.length > 0 ? files : undefined,
     timestamp: raw.createdDateTime ?? '',
     ...(replyId ? { root_message_id: replyId, parent_message_id: replyId, is_thread_reply: true } : {}),
     raw_content: raw.body?.content ?? '',

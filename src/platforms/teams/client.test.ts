@@ -538,6 +538,24 @@ describe('TeamsClient', () => {
   })
 
   describe('Graph message history', () => {
+    it('exposes html and attachment files for rich channel messages', async () => {
+      const attachmentUrl = 'https://contoso.sharepoint.com/sites/team/Shared%20Documents/plan.docx'
+      mockResponse({
+        value: [
+          {
+            ...graphMessage(),
+            body: { contentType: 'html', content: '<p>Plan attached</p>' },
+            attachments: [{ id: 'a1', contentType: 'reference', contentUrl: attachmentUrl, name: 'plan.docx' }],
+          },
+        ],
+      })
+      const client = await graphClient()
+      const [message] = await client.getMessages('111', 'ch1')
+      expect(message.content).toBe('Plan attached')
+      expect(message.html).toBe('<p>Plan attached</p>')
+      expect(message.files).toEqual([attachmentUrl])
+    })
+
     it('reads root history, empty history, and replies with parent linkage', async () => {
       mockResponse({ value: [graphMessage()] })
       mockResponse({ value: [] })
