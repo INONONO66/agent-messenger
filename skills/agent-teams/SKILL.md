@@ -39,7 +39,7 @@ agent-teams channel list <team-id>
 Choose authentication by the required operations:
 
 1. **`agent-teams auth login`** (work/school **or** personal Microsoft accounts) — device-code sign-in. Open the printed URL, enter the code, and approve in your browser. No desktop app or browser extraction needed. It prompts for your Microsoft email (or pass `--email <email>`) and auto-detects work vs personal, then starts the matching flow; pass `--account-type work|personal` to force it and skip detection. Only `auth login` stores the AAD refresh token required by `message search`.
-2. **`agent-teams auth extract`** supplies a Skype token from desktop/browser cookies for chats and legacy discovery. It cannot mint the Graph/Substrate tokens required by channel, directory, file and search operations.
+2. **`agent-teams auth extract`** supplies a Skype token from desktop/browser cookies for chats and legacy discovery. It cannot mint Graph/Substrate tokens, so channel, member and file commands fall back to the older Teams CSA routes and `message search` is unavailable.
 
 Automatic extraction can happen when no device-code account is stored. If any stored account uses device-code, automatic extraction is suppressed, including when another account type is selected. A failed refresh therefore cannot overwrite a deliberate login with another desktop/browser identity.
 
@@ -284,9 +284,9 @@ Messages from `chat history`, `chat get`, `message list/get/replies`, and `chann
 - `content` — plain text (paragraphs as newlines, links as `text (url)`; numeric and common named entities such as `&amp;`, `&nbsp;`, `&mdash;` are decoded, rarer named entities stay literal)
 - `html` — the original HTML, only for rich-text messages; use it to see where images sit in the text
 - `files` — every downloadable URL in the message: inline images first (in order), then attachments
-- `raw_content`, `content_type`, `mentions`, `attachments`, `raw` — the server representation, kept alongside the rendered fields (not in `chat get`) (`edited_at`/`deleted_at` and thread fields appear on channel messages when set)
+- `raw_content`, `content_type`, `mentions`, `attachments` — the server representation, kept alongside the rendered fields (not in `chat get`; the full server object is SDK-only as `raw`) (`edited_at`/`deleted_at` and thread fields appear on channel messages when set)
 
-`message search` results carry `id`, `channel_id`, `thread_id`, `author`, `content` (indexed preview), `timestamp`, optional `team_name`/`channel_name`/`permalink`, and the original Substrate result in `raw`.
+`message search` results carry `id`, `channel_id`, `thread_id`, `author`, `content` (indexed preview), `timestamp`, optional `team_name`/`channel_name`/`permalink`.
 
 Download any `files` entry with `agent-teams file download <url> [output-path]`.
 
@@ -426,7 +426,7 @@ With `--full`, returns comprehensive JSON with:
 
 ## Output Format
 
-Channel `message list/get/replies` and `chat history` retain `raw_content`, `content_type`, `mentions`, `attachments` and `raw` alongside rendered `content`. HTML source newlines after `<br>` do not create duplicate blank lines. Media and system records remain in chat history. Default history returns an array and follows pages; `chat history --page` or `--cursor` returns `{messages, next_cursor}` for resumable reads. Search returns indexed previews and `raw`; plain previews preserve literal angle brackets and entities. Use exact history/get for full source messages.
+Channel `message list/get/replies` and `chat history` retain `raw_content`, `content_type`, `mentions` and `attachments` alongside rendered `content`. HTML source newlines after `<br>` do not create duplicate blank lines. Media records remain in chat history; membership, call and other system records are hidden unless you pass `chat history --include-system`. Default history returns an array and follows pages; `chat history --page` or `--cursor` returns `{messages, next_cursor}` for resumable reads. Search returns indexed previews; plain previews preserve literal angle brackets and entities. Use exact history/get for full source messages.
 
 Replies require `--thread <root-message-id>` for `message get`, `message delete`, `reaction add` and `reaction remove`. Reaction input accepts Unicode or the names `like`, `heart`, `laugh`, `surprised`, `sad`, `angry`. The client converts those names to Graph Unicode. Channel deletion reads the exact Graph target first, then uses Chat Service with the existing Skype token. This avoids a Graph DELETE call, but Chat Service can still return 403 when the account lacks permission to delete the message; Teams ownership and deletion policy still apply. An uncertain delete is not replayed or retried through another API.
 

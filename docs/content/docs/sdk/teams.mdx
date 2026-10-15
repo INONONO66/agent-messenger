@@ -15,7 +15,7 @@ import { TeamsClient, TeamsCredentialManager, TeamsError } from 'agent-messenger
 
 ## TeamsClient
 
-Work/school channel, directory and file methods use Microsoft Graph with the existing `TeamsTokenProvider`. Sign in with `agent-teams auth login` first; an extracted Skype token alone cannot access these methods. Private/group chats continue to use the Skype messaging service. Tenant policies and permissions can restrict individual operations.
+Work/school channel, directory and file methods use Microsoft Graph with the existing `TeamsTokenProvider`. Accounts without an `auth login` token (for example, set up with `auth extract`) fall back to the Teams CSA routes with the Skype token. Private/group chats continue to use the Skype messaging service. Tenant policies and permissions can restrict individual operations.
 
 The main client for interacting with Microsoft Teams' API programmatically. Graph and Skype GET requests routed through the client request helpers include rate-limit handling and backoff on server errors; direct downloads are not retried. Search uses a POST and is not automatically retried. Mutations are attempted once to avoid duplicate delivery after an ambiguous response.
 
@@ -395,7 +395,7 @@ const page = await client.getChatMessagesPage(chatId, 50)
 const next = page.next_cursor ? await client.getChatMessagesPage(chatId, 50, page.next_cursor) : undefined
 ```
 
-`getChatMessages(chatId, limit)` follows pages automatically and includes media/system records. `getMessages` and `getThreadReplies` follow Graph pages up to the requested limit. Original server bodies remain in `raw`, even when text is rendered for agents. Search results are indexed previews, with their original result in `raw`.
+`getChatMessages(chatId, limit, { includeSystem })` follows pages automatically and includes media records; system records are included only with `includeSystem: true`. `getMessages` and `getThreadReplies` follow Graph pages up to the requested limit. Original server bodies remain in `raw`, even when text is rendered for agents. Search results are indexed previews, with their original result in `raw`.
 
 ### Reply targets and reaction permissions
 

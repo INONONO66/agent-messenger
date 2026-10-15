@@ -4,7 +4,7 @@ Use the account and exact destinations authorized by the user. Channel names are
 
 ## Sign in and resolve the destination
 
-Work/school channels, directory, files and search require device-code authentication. Sign in once, then let the CLI refresh the same account silently:
+Device-code authentication is recommended for work/school accounts: it enables Graph-backed channel, directory and file operations and is required for search. Accounts set up with `auth extract` keep channel, directory, reaction and file commands through the older CSA routes, but cannot search. Sign in once, then let the CLI refresh the same account silently:
 
 ```bash
 agent-teams auth login --email user@example.com --account-type work
@@ -91,7 +91,7 @@ Device-code refresh happens in the CLI. Stop and reconnect if it fails. Polling 
 
 ## Files and mentions
 
-Channel file commands use Graph drive folders:
+Channel file commands use Graph drive folders (accounts set up with `auth extract` fall back to the older CSA file routes):
 
 ```bash
 agent-teams file list "$TEAM_ID" "$CHANNEL_ID"

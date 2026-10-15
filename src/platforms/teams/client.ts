@@ -23,11 +23,17 @@ import type {
   TeamsTeam,
   TeamsUser,
 } from './types'
-import { TeamsError } from './types'
+import { TeamsAuthCapabilityError, TeamsError } from './types'
 
 interface RateLimitBucket {
   remaining: number
   resetAt: number
+}
+
+interface RawTeamsMessage extends TeamsMessage {
+  rootMessageId?: string
+  parentMessageId?: string
+  properties?: unknown
 }
 
 type JsonRecord = Record<string, unknown>
@@ -37,6 +43,7 @@ const MAX_RETRIES = 3
 const BASE_BACKOFF_MS = 100
 const DEFAULT_REGION: TeamsRegion = 'amer'
 const REGIONS: TeamsRegion[] = ['amer', 'emea', 'apac']
+const CSA_API_BASE = 'https://teams.microsoft.com/api'
 const GRAPH_API_BASE = 'https://graph.microsoft.com/v1.0'
 
 function reactionUnicode(emoji: string): string {
@@ -318,6 +325,23 @@ function toChatMessage(message: RawChatMessage, chatId: string): TeamsMessage {
   }
 }
 
+function withCsaContent(message: RawTeamsMessage, rootMessageId?: string): TeamsMessage {
+  const { rootMessageId: messageRootId, parentMessageId, properties, ...rest } = message
+  const isThreadReply = Boolean(
+    rootMessageId ||
+    (messageRootId !== undefined && messageRootId !== message.id) ||
+    (parentMessageId !== undefined && parentMessageId !== message.id),
+  )
+  const rootId = rootMessageId ?? messageRootId
+  return {
+    ...rest,
+    ...parseTeamsContent(message.content, { properties }),
+    root_message_id: isThreadReply ? rootId : undefined,
+    parent_message_id: isThreadReply ? (parentMessageId ?? rootId) : undefined,
+    is_thread_reply: isThreadReply ? true : undefined,
+  }
+}
+
 // groupId => Teams/channel thread (handled by listTeams). "48:notes"/
 // streamofnotes => the user's self ("to me") chat. Anything else without a
 // non-chat threadType is a normal 1:1 (no topic) or group (has topic) chat.
@@ -354,6 +378,7 @@ export class TeamsClient {
         throw new TeamsError('Token is required', 'missing_token')
       }
       this.token = credentials.token
+      this.getTokenProvider().expectSkypeToken(credentials.token)
       if (credentials.tokenExpiresAt) {
         this.tokenExpiresAt = new Date(credentials.tokenExpiresAt)
       }
@@ -566,6 +591,44 @@ export class TeamsClient {
     }
 
     throw new TeamsError('Request failed after retries', 'max_retries')
+  }
+
+  private async requestFormData<T>(path: string, formData: FormData, baseUrl?: string): Promise<T> {
+    if (this.isTokenExpired()) {
+      throw new TeamsError('Token has expired. Run "auth login" or "auth extract" to refresh.', 'token_expired')
+    }
+
+    if (baseUrl === undefined && !this.regionDiscovered) {
+      await this.discoverRegion()
+    }
+
+    const url = `${baseUrl ?? this.getMsgApiBase()}${path}`
+    const bucketKey = this.getBucketKey('POST', path)
+
+    await this.waitForRateLimit(bucketKey)
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Skypetoken': this.ensureAuth(),
+      },
+      body: formData,
+    })
+
+    this.updateBucket(bucketKey, response)
+
+    if (!response.ok) {
+      const errorBody = (await response.json().catch(() => null)) as {
+        message?: string
+        code?: string | number
+      } | null
+      throw new TeamsError(
+        errorBody?.message || `HTTP ${response.status}`,
+        errorBody?.code?.toString() ?? `http_${response.status}`,
+      )
+    }
+
+    return response.json() as Promise<T>
   }
 
   async testAuth(): Promise<TeamsUser> {
@@ -791,6 +854,17 @@ export class TeamsClient {
     }
   }
 
+  // Graph needs the AAD refresh token saved by `auth login` for this client's own identity;
+  // otherwise (extract-only, nothing saved, or a different saved user) the CSA routes are used.
+  private async withCsaFallback<T>(viaGraph: () => Promise<T>, viaCsa: () => Promise<T>): Promise<T> {
+    try {
+      return await viaGraph()
+    } catch (error) {
+      if (error instanceof TeamsAuthCapabilityError) return viaCsa()
+      throw error
+    }
+  }
+
   private graph(): TeamsGraph {
     return new TeamsGraph(() => this.getTokenProvider().getGraphToken())
   }
@@ -809,15 +883,26 @@ export class TeamsClient {
   }
 
   async getTeam(teamId: string): Promise<TeamsTeam> {
-    return graphTeam(await this.graph().request('GET', `/teams/${segment(teamId)}`))
+    return this.withCsaFallback(
+      async () => graphTeam(await this.graph().request('GET', `/teams/${segment(teamId)}`)),
+      () => this.request<TeamsTeam>('GET', `/csa/api/v1/teams/${teamId}`, undefined, CSA_API_BASE),
+    )
   }
 
   async listChannels(teamId: string): Promise<TeamsChannel[]> {
-    return (await this.graph().collection(`/teams/${segment(teamId)}/channels`)).map((raw) => graphChannel(raw, teamId))
+    return this.withCsaFallback(
+      async () =>
+        (await this.graph().collection(`/teams/${segment(teamId)}/channels`)).map((raw) => graphChannel(raw, teamId)),
+      () => this.request<TeamsChannel[]>('GET', `/csa/api/v1/teams/${teamId}/channels`, undefined, CSA_API_BASE),
+    )
   }
 
   async getChannel(teamId: string, channelId: string): Promise<TeamsChannel> {
-    return graphChannel(await this.graph().request('GET', this.channelPath(teamId, channelId)), teamId)
+    return this.withCsaFallback(
+      async () => graphChannel(await this.graph().request('GET', this.channelPath(teamId, channelId)), teamId),
+      () =>
+        this.request<TeamsChannel>('GET', `/csa/api/v1/teams/${teamId}/channels/${channelId}`, undefined, CSA_API_BASE),
+    )
   }
 
   async sendMessage(
@@ -829,18 +914,43 @@ export class TeamsClient {
   ): Promise<TeamsMessage> {
     const path =
       this.channelPath(teamId, channelId) + '/messages' + (rootMessageId ? `/${segment(rootMessageId)}/replies` : '')
-    const raw = await this.graph().request('POST', path, {
-      body: { contentType: 'html', content: formatContent(content, format) },
-    })
-    return graphMessage(raw, channelId, rootMessageId)
+    const html = formatContent(content, format)
+    return this.withCsaFallback(
+      async () =>
+        graphMessage(
+          await this.graph().request('POST', path, { body: { contentType: 'html', content: html } }),
+          channelId,
+          rootMessageId,
+        ),
+      async () => {
+        const csaPath =
+          `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages` +
+          (rootMessageId ? `/${rootMessageId}/replies` : '')
+        const body = rootMessageId ? { content: html, parentMessageId: rootMessageId } : { content: html }
+        return withCsaContent(await this.request<RawTeamsMessage>('POST', csaPath, body, CSA_API_BASE), rootMessageId)
+      },
+    )
   }
 
   async getMessages(teamId: string, channelId: string, limit = 50): Promise<TeamsMessage[]> {
-    const values = await this.graph().collection(
-      this.channelPath(teamId, channelId) + `/messages?$top=${Math.min(limit, 50)}`,
-      limit,
+    return this.withCsaFallback(
+      async () =>
+        (
+          await this.graph().collection(
+            this.channelPath(teamId, channelId) + `/messages?$top=${Math.min(limit, 50)}`,
+            limit,
+          )
+        ).map((raw) => graphMessage(raw, channelId)),
+      async () =>
+        (
+          await this.request<RawTeamsMessage[]>(
+            'GET',
+            `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages?limit=${limit}`,
+            undefined,
+            CSA_API_BASE,
+          )
+        ).map((message) => withCsaContent(message)),
     )
-    return values.map((raw) => graphMessage(raw, channelId))
   }
 
   async getThreadReplies(
@@ -849,11 +959,25 @@ export class TeamsClient {
     rootMessageId: string,
     limit = 50,
   ): Promise<TeamsMessage[]> {
-    const values = await this.graph().collection(
-      this.channelPath(teamId, channelId) + `/messages/${segment(rootMessageId)}/replies?$top=${Math.min(limit, 50)}`,
-      limit,
+    return this.withCsaFallback(
+      async () =>
+        (
+          await this.graph().collection(
+            this.channelPath(teamId, channelId) +
+              `/messages/${segment(rootMessageId)}/replies?$top=${Math.min(limit, 50)}`,
+            limit,
+          )
+        ).map((raw) => graphMessage(raw, channelId, rootMessageId)),
+      async () =>
+        (
+          await this.request<RawTeamsMessage[]>(
+            'GET',
+            `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies?limit=${limit}`,
+            undefined,
+            CSA_API_BASE,
+          )
+        ).map((reply) => withCsaContent(reply, rootMessageId)),
     )
-    return values.map((raw) => graphMessage(raw, channelId, rootMessageId))
   }
 
   async searchMessages(query: string, opts: { limit?: number; from?: number } = {}): Promise<TeamsSearchResult[]> {
@@ -918,17 +1042,42 @@ export class TeamsClient {
     messageId: string,
     rootMessageId?: string,
   ): Promise<TeamsMessage> {
-    return graphMessage(
-      await this.graph().request('GET', this.messagePath(teamId, channelId, messageId, rootMessageId)),
-      channelId,
-      rootMessageId,
+    return this.withCsaFallback(
+      async () =>
+        graphMessage(
+          await this.graph().request('GET', this.messagePath(teamId, channelId, messageId, rootMessageId)),
+          channelId,
+          rootMessageId,
+        ),
+      async () =>
+        withCsaContent(
+          await this.request<RawTeamsMessage>(
+            'GET',
+            `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages/${messageId}`,
+            undefined,
+            CSA_API_BASE,
+          ),
+          rootMessageId,
+        ),
     )
   }
 
   async deleteMessage(teamId: string, channelId: string, messageId: string, rootMessageId?: string): Promise<void> {
     // Resolve the exact team/channel/reply before writing to Chat Service, which
     // uses the existing Skype token instead of Graph's broader delete scope.
-    const message = await this.getMessage(teamId, channelId, messageId, rootMessageId)
+    let message: TeamsMessage
+    try {
+      message = await this.getMessage(teamId, channelId, messageId, rootMessageId)
+    } catch (error) {
+      if (!(error instanceof TeamsAuthCapabilityError)) throw error
+      await this.request<void>(
+        'DELETE',
+        `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages/${messageId}`,
+        undefined,
+        CSA_API_BASE,
+      )
+      return
+    }
     if (message.id !== messageId)
       throw new TeamsError('Delete target did not match the message.', 'delete_target_mismatch')
     if (message.deleted_at) return
@@ -948,9 +1097,19 @@ export class TeamsClient {
     emoji: string,
     rootMessageId?: string,
   ): Promise<void> {
-    await this.graph().request('POST', this.messagePath(teamId, channelId, messageId, rootMessageId) + '/setReaction', {
-      reactionType: reactionUnicode(emoji),
-    })
+    await this.withCsaFallback<unknown>(
+      () =>
+        this.graph().request('POST', this.messagePath(teamId, channelId, messageId, rootMessageId) + '/setReaction', {
+          reactionType: reactionUnicode(emoji),
+        }),
+      () =>
+        this.request<void>(
+          'POST',
+          `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages/${messageId}/reactions`,
+          { emoji },
+          CSA_API_BASE,
+        ),
+    )
   }
 
   async removeReaction(
@@ -960,19 +1119,33 @@ export class TeamsClient {
     emoji: string,
     rootMessageId?: string,
   ): Promise<void> {
-    await this.graph().request(
-      'POST',
-      this.messagePath(teamId, channelId, messageId, rootMessageId) + '/unsetReaction',
-      { reactionType: reactionUnicode(emoji) },
+    await this.withCsaFallback<unknown>(
+      () =>
+        this.graph().request('POST', this.messagePath(teamId, channelId, messageId, rootMessageId) + '/unsetReaction', {
+          reactionType: reactionUnicode(emoji),
+        }),
+      () =>
+        this.request<void>(
+          'DELETE',
+          `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/messages/${messageId}/reactions/${emoji}`,
+          undefined,
+          CSA_API_BASE,
+        ),
     )
   }
 
   async listUsers(teamId: string): Promise<TeamsUser[]> {
-    return (await this.graph().collection(`/teams/${segment(teamId)}/members`)).map(graphUser)
+    return this.withCsaFallback(
+      async () => (await this.graph().collection(`/teams/${segment(teamId)}/members`)).map(graphUser),
+      () => this.request<TeamsUser[]>('GET', `/csa/api/v1/teams/${teamId}/members`, undefined, CSA_API_BASE),
+    )
   }
 
   async getUser(userId: string): Promise<TeamsUser> {
-    return graphUser(await this.graph().request('GET', `/users/${segment(userId)}`))
+    return this.withCsaFallback(
+      async () => graphUser(await this.graph().request('GET', `/users/${segment(userId)}`)),
+      () => this.request<TeamsUser>('GET', `/csa/api/v1/users/${userId}`, undefined, CSA_API_BASE),
+    )
   }
 
   private async fileFolder(teamId: string, channelId: string): Promise<{ id: string; driveId: string }> {
@@ -983,18 +1156,42 @@ export class TeamsClient {
   }
 
   async uploadFile(teamId: string, channelId: string, filePath: string): Promise<TeamsFile> {
-    const folder = await this.fileFolder(teamId, channelId)
     const bytes = await readFile(filePath)
-    const path = `/drives/${segment(folder.driveId)}/items/${segment(folder.id)}:/${segment(basename(filePath))}:/content`
-    const raw = await this.graph().request('PUT', path, undefined, new Uint8Array(bytes))
-    return graphFile(raw, folder.driveId)
+    const filename = basename(filePath) || 'file'
+    return this.withCsaFallback(
+      async () => {
+        const folder = await this.fileFolder(teamId, channelId)
+        const path = `/drives/${segment(folder.driveId)}/items/${segment(folder.id)}:/${segment(filename)}:/content`
+        return graphFile(await this.graph().request('PUT', path, undefined, new Uint8Array(bytes)), folder.driveId)
+      },
+      () => {
+        const formData = new FormData()
+        formData.append('file', new Blob([bytes]), filename)
+        return this.requestFormData<TeamsFile>(
+          `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/files`,
+          formData,
+          CSA_API_BASE,
+        )
+      },
+    )
   }
 
   async listFiles(teamId: string, channelId: string): Promise<TeamsFile[]> {
-    const folder = await this.fileFolder(teamId, channelId)
-    return (
-      await this.graph().collection(`/drives/${segment(folder.driveId)}/items/${segment(folder.id)}/children`)
-    ).map((raw) => graphFile(raw, folder.driveId))
+    return this.withCsaFallback(
+      async () => {
+        const folder = await this.fileFolder(teamId, channelId)
+        return (
+          await this.graph().collection(`/drives/${segment(folder.driveId)}/items/${segment(folder.id)}/children`)
+        ).map((raw) => graphFile(raw, folder.driveId))
+      },
+      () =>
+        this.request<TeamsFile[]>(
+          'GET',
+          `/csa/${this.region}/api/v2/teams/${teamId}/channels/${channelId}/files`,
+          undefined,
+          CSA_API_BASE,
+        ),
+    )
   }
 
   async downloadFile(teamId: string, channelId: string, fileId: string): Promise<{ buffer: Buffer; file: TeamsFile }> {
@@ -1057,7 +1254,7 @@ export class TeamsClient {
   }
 
   private async fetchGraphShare(url: string): Promise<Response> {
-    const graphToken = await new TeamsTokenProvider(this.credManager).getGraphToken()
+    const graphToken = await this.getTokenProvider().getGraphToken()
     const shareId = `u!${Buffer.from(url).toString('base64url').replace(/=+$/, '')}`
     return fetch(`${GRAPH_API_BASE}/shares/${shareId}/driveItem/content`, {
       headers: {

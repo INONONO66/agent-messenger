@@ -20,7 +20,7 @@ agent-teams message send <team-id> <channel-id> "Hello from AI agent!"
 
 ## Authentication
 
-Use `auth login` for work/school channel, directory, search and Graph-backed file operations. These use Microsoft bearer tokens from the saved device-code account. `auth extract` supplies a Skype token for chats, legacy discovery and trusted Teams-hosted inline downloads. Your tenant policies and delegated permissions still apply.
+Use `auth login` for work/school channel, directory, search and Graph-backed file operations; accounts set up with `auth extract` fall back to the older Teams CSA routes for channel, member and file commands. These use Microsoft bearer tokens from the saved device-code account. `auth extract` supplies a Skype token for chats, legacy discovery and trusted Teams-hosted inline downloads. Your tenant policies and delegated permissions still apply.
 
 An expired device-code login is refreshed for the same account. If refresh fails, the CLI does not replace it with a different desktop/browser identity. Run `auth login` explicitly to reconnect.
 
@@ -383,7 +383,7 @@ Preserve the server receipt. If a write fails or its response is lost, inspect e
 
 ## Message fidelity and pagination
 
-History and message commands retain the legacy text fields and additionally return `raw_content`, `content_type`, `mentions`, `attachments`, and the original server `raw` object. Chat history includes media and system records. Search returns an indexed preview with its original result in `raw`; fetch the exact message for the full body.
+History and message commands retain the legacy text fields and additionally return `raw_content`, `content_type`, `mentions` and `attachments`. Chat history includes media records; pass `--include-system` to also include membership, call and other system records. Search returns an indexed preview; fetch the exact message for the full body.
 
 Channel history and replies follow Graph pagination up to `--limit`. Chat history follows message pages by default; resumable single-page output is explicit:
 

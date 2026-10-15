@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { TeamsClient } from './client'
 import { TeamsCredentialManager } from './credential-manager'
-import { TeamsError } from './types'
+import { TeamsAuthCapabilityError, TeamsError } from './types'
 
 const TEMP_FILES_TO_CLEANUP = ['/tmp/test-teams-upload.txt']
 const TEMP_DIRS_TO_CLEANUP: string[] = []
@@ -534,6 +534,162 @@ describe('TeamsClient', () => {
       const client = await graphClient()
       await client.sendMessage('111', 'ch1', 'Hey <at id="29:xyz">John</at>', undefined, 'html')
       expect(JSON.parse(String(fetchCalls[0].options?.body)).body.content).toBe('Hey <at id="29:xyz">John</at>')
+    })
+  })
+
+  describe('CSA fallback for extract-only accounts', () => {
+    const extractOnlyClient = async () => {
+      const client = await new TeamsClient().login({ token: 'skype-token', region: 'emea' })
+      ;(client as any).getTokenProvider().getGraphToken = async () => {
+        throw new TeamsAuthCapabilityError()
+      }
+      return client
+    }
+
+    it('reads channels and channel messages through CSA when no Graph token is available', async () => {
+      mockResponse([{ id: 'ch1', team_id: '111', name: 'General' }])
+      mockResponse([
+        {
+          id: 'msg1',
+          channel_id: 'ch1',
+          author: { id: '123', displayName: 'User 1' },
+          content: '<p>Release <b>today</b></p>',
+          timestamp: '2024-01-01T00:00:00.000Z',
+        },
+      ])
+      const client = await extractOnlyClient()
+
+      const channels = await client.listChannels('111')
+      const [message] = await client.getMessages('111', 'ch1', 50)
+
+      expect(channels[0].name).toBe('General')
+      expect(message.content).toBe('Release today')
+      expect(message.html).toBe('<p>Release <b>today</b></p>')
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://teams.microsoft.com/api/csa/api/v1/teams/111/channels',
+        'https://teams.microsoft.com/api/csa/emea/api/v2/teams/111/channels/ch1/messages?limit=50',
+      ])
+    })
+
+    it('uses CSA for a bare-token client when no credentials are saved', async () => {
+      // given: a real token provider over an empty config directory
+      const dir = join(import.meta.dir, `.test-teams-empty-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+      TEMP_DIRS_TO_CLEANUP.push(dir)
+      mockResponse([{ id: 'ch1', team_id: '111', name: 'General' }])
+      const client = await new TeamsClient(new TeamsCredentialManager(dir)).login({
+        token: 'skype-token',
+        region: 'emea',
+      })
+
+      // when
+      const channels = await client.listChannels('111')
+
+      // then
+      expect(channels[0].name).toBe('General')
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://teams.microsoft.com/api/csa/api/v1/teams/111/channels',
+      ])
+    })
+
+    it('never acts as a different saved device-code identity than the supplied token', async () => {
+      // given: a saved device-code account for another user
+      const manager = await setupCredentialManager()
+      mockResponse({ id: 'm1', content: 'Hi' })
+      const client = await new TeamsClient(manager).login({
+        token: 'other-user-skype-token',
+        accountType: 'work',
+        region: 'emea',
+      })
+
+      // when
+      await client.sendMessage('111', 'ch1', 'Hi')
+
+      // then: the write goes through CSA with the supplied token, never Graph or token refresh
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://teams.microsoft.com/api/csa/emea/api/v2/teams/111/channels/ch1/messages',
+      ])
+      expect((fetchCalls[0].options?.headers as Record<string, string>)['X-Skypetoken']).toBe('other-user-skype-token')
+    })
+
+    const graphBearer = (oid: string): string => {
+      const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+      const payload = Buffer.from(
+        JSON.stringify({ aud: GRAPH_AUDIENCE, tid: SEARCH_TENANT_ID, oid, exp: Math.floor(Date.now() / 1000) + 3600 }),
+      ).toString('base64url')
+      return `${header}.${payload}.signature`
+    }
+    const saveWorkAccount = (manager: TeamsCredentialManager, token: string, aadRefreshToken?: string) =>
+      aadRefreshToken
+        ? manager.setDeviceCodeAccount({
+            accountType: 'work',
+            token,
+            tokenExpiresAt: '2100-01-01T00:00:00Z',
+            aadRefreshToken,
+            aadClientId: 'client-id',
+            teams: {},
+            currentTeam: null,
+          })
+        : manager.setToken(token, 'work', '2100-01-01T00:00:00Z')
+
+    it('keeps an extract-only client on CSA after the saved account is replaced by another user', async () => {
+      // given: an extract-only saved account A that this client logged in as
+      const manager = await setupCredentialManager()
+      await saveWorkAccount(manager, 'user-a-skype-token')
+      const client = await new TeamsClient(manager).login({
+        token: 'user-a-skype-token',
+        accountType: 'work',
+        region: 'emea',
+      })
+      mockResponse([{ id: 'ch1', team_id: '111', name: 'General' }])
+      await client.listChannels('111')
+
+      // when: the saved work account is replaced by device-code user B, without re-login
+      await saveWorkAccount(manager, 'user-b-skype-token', 'user-b-refresh')
+      mockResponse({ id: 'm1', content: 'Hi' })
+      await client.sendMessage('111', 'ch1', 'Hi')
+
+      // then: the write stays on CSA as A, with no token refresh for B
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://teams.microsoft.com/api/csa/api/v1/teams/111/channels',
+        'https://teams.microsoft.com/api/csa/emea/api/v2/teams/111/channels/ch1/messages',
+      ])
+      expect((fetchCalls[1].options?.headers as Record<string, string>)['X-Skypetoken']).toBe('user-a-skype-token')
+    })
+
+    it('mints a fresh Graph bearer for the new user after re-login instead of reusing the cached one', async () => {
+      // given: a client that warmed the Graph bearer cache as device-code user A
+      const manager = await setupCredentialManager()
+      await saveWorkAccount(manager, 'user-a-skype-token', 'user-a-refresh')
+      const client = await new TeamsClient(manager).login({
+        token: 'user-a-skype-token',
+        accountType: 'work',
+        region: 'emea',
+      })
+      mockResponse({ access_token: graphBearer('user-a'), expires_in: 3600 })
+      mockResponse({ value: [{ id: 'ch1', displayName: 'General' }] })
+      await client.listChannels('111')
+
+      // when: the saved account becomes user B and the client logs in as B
+      await saveWorkAccount(manager, 'user-b-skype-token', 'user-b-refresh')
+      await client.login({ token: 'user-b-skype-token', accountType: 'work', region: 'emea' })
+      mockResponse({ access_token: graphBearer('user-b'), expires_in: 3600 })
+      mockResponse({ id: 'm1', body: { contentType: 'html', content: 'Hi' } })
+      await client.sendMessage('111', 'ch1', 'Hi')
+
+      // then: B's refresh token is used and the mutation carries B's bearer, never A's
+      expect(String(fetchCalls[2].options?.body)).toContain('refresh_token=user-b-refresh')
+      expect(fetchCalls[3].url).toBe('https://graph.microsoft.com/v1.0/teams/111/channels/ch1/messages')
+      expect((fetchCalls[3].options?.headers as Record<string, string>).Authorization).toBe(
+        `Bearer ${graphBearer('user-b')}`,
+      )
+    })
+
+    it('does not fall back to CSA when Graph fails for another reason', async () => {
+      mockResponse({ error: { code: 'Forbidden', message: 'Denied' } }, 403)
+      const client = await graphClient()
+
+      await expect(client.listChannels('111')).rejects.toThrow('Denied')
+      expect(fetchCalls).toHaveLength(1)
     })
   })
 
