@@ -84,12 +84,40 @@ export function selectUnreadChannels<T extends ReadStateCandidateChannel>(
 
 export class DiscordError extends Error {
   code: string
+  /** HTTP status of the refused response, when the error came from one. */
+  httpStatus?: number
+  /** Seconds the platform asked us to wait, on a `rate_limited` error. */
+  retryAfter?: number
 
-  constructor(message: string, code: string) {
+  constructor(message: string, code: string, details?: { httpStatus?: number; retryAfter?: number }) {
     super(message)
     this.name = 'DiscordError'
     this.code = code
+    if (details?.httpStatus !== undefined) this.httpStatus = details.httpStatus
+    if (details?.retryAfter !== undefined) this.retryAfter = details.retryAfter
   }
+}
+
+export interface DiscordClientOptions {
+  /**
+   * How many times a request is re-sent after a 429 or a 5xx. Defaults to 3.
+   * `0` makes every call a single physical attempt for callers that own
+   * idempotency themselves.
+   */
+  retries?: number
+}
+
+/** Bytes to attach to a message, named and typed for the multipart part. */
+export interface DiscordFileData {
+  data: Uint8Array
+  filename: string
+  contentType?: string
+}
+
+export interface DiscordCreateMessageOptions {
+  content?: string
+  files?: DiscordFileData[]
+  reply_to?: string
 }
 
 interface RateLimitBucket {
@@ -100,7 +128,7 @@ interface RateLimitBucket {
 
 const BASE_URL = 'https://discord.com/api/v10'
 
-const MAX_RETRIES = 3
+const DEFAULT_MAX_RETRIES = 3
 const BASE_BACKOFF_MS = 100
 const MAX_SEARCH_INDEX_RETRY_MS = 30_000
 
@@ -108,6 +136,15 @@ export class DiscordClient {
   private token: string | null = null
   private buckets: Map<string, RateLimitBucket> = new Map()
   private globalRateLimitUntil: number = 0
+  private readonly maxRetries: number
+
+  constructor(options?: DiscordClientOptions) {
+    const retries = options?.retries ?? DEFAULT_MAX_RETRIES
+    if (!Number.isInteger(retries) || retries < 0) {
+      throw new DiscordError('retries must be a non-negative integer', 'invalid_retries')
+    }
+    this.maxRetries = retries
+  }
 
   async login(credentials?: { token: string }): Promise<this> {
     if (credentials) {
@@ -198,7 +235,7 @@ export class DiscordClient {
     const url = `${BASE_URL}${path}`
     const bucketKey = this.getBucketKey(method, path)
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       await this.waitForRateLimit(bucketKey)
 
       const headers: Record<string, string> = getDiscordHeaders(this.ensureAuth())
@@ -217,15 +254,18 @@ export class DiscordClient {
       this.updateBucket(bucketKey, response)
 
       if (response.status === 429) {
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.handleRateLimitResponse(response)
           continue
         }
         const errorBody = await response.json().catch(() => ({}))
-        throw new DiscordError((errorBody as any).message || 'Rate limited', 'rate_limited')
+        throw new DiscordError((errorBody as any).message || 'Rate limited', 'rate_limited', {
+          httpStatus: 429,
+          retryAfter: parseFloat(response.headers.get('Retry-After') || '1'),
+        })
       }
 
-      if (response.status >= 500 && attempt < MAX_RETRIES) {
+      if (response.status >= 500 && attempt < this.maxRetries) {
         await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
         continue
       }
@@ -235,6 +275,7 @@ export class DiscordClient {
         throw new DiscordError(
           (errorBody as any).message || `HTTP ${response.status}`,
           (errorBody as any).code?.toString() || `http_${response.status}`,
+          { httpStatus: response.status },
         )
       }
 
@@ -268,6 +309,7 @@ export class DiscordClient {
       throw new DiscordError(
         (errorBody as any).message || `HTTP ${response.status}`,
         (errorBody as any).code?.toString() || `http_${response.status}`,
+        { httpStatus: response.status },
       )
     }
 
@@ -372,6 +414,39 @@ export class DiscordClient {
     const message = await this.requestFormData<MessageWithAttachments>(`/channels/${channelId}/messages`, formData)
 
     return message.attachments[0]
+  }
+
+  /**
+   * One message with optional byte attachments (`files[n]` parts beside
+   * `payload_json`); a reply to a deleted original still sends.
+   */
+  async createMessage(channelId: string, options: DiscordCreateMessageOptions): Promise<DiscordMessage> {
+    const files = options.files ?? []
+    if ((options.content === undefined || options.content.trim() === '') && files.length === 0) {
+      throw new DiscordError('Message must have content or at least one file', 'empty_message')
+    }
+    const payload: Record<string, unknown> = {}
+    if (options.content !== undefined) payload.content = options.content
+    if (options.reply_to !== undefined)
+      payload.message_reference = { message_id: options.reply_to, fail_if_not_exists: false }
+    if (files.length === 0) return this.request<DiscordMessage>('POST', `/channels/${channelId}/messages`, payload)
+
+    const formData = new FormData()
+    formData.append(
+      'payload_json',
+      JSON.stringify({ ...payload, attachments: files.map((file, index) => ({ id: index, filename: file.filename })) }),
+    )
+    for (const [index, file] of files.entries()) {
+      const blob =
+        file.contentType === undefined ? new Blob([file.data]) : new Blob([file.data], { type: file.contentType })
+      formData.append(`files[${index}]`, blob, file.filename)
+    }
+    return this.requestFormData<DiscordMessage>(`/channels/${channelId}/messages`, formData)
+  }
+
+  /** Shows the typing indicator in a channel for about ten seconds. */
+  async triggerTyping(channelId: string): Promise<void> {
+    return this.request<void>('POST', `/channels/${channelId}/typing`)
   }
 
   async listFiles(channelId: string): Promise<DiscordFile[]> {
@@ -667,7 +742,7 @@ export class DiscordClient {
 
     const path = `/guilds/${guildId}/messages/search?${params.toString()}`
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
       const response: unknown = await this.request('GET', path)
       const searchResponse = DiscordSearchResponseSchema.safeParse(response)
 
@@ -696,7 +771,7 @@ export class DiscordClient {
         throw new DiscordError('Discord returned an invalid search response', 'invalid_search_response')
       }
 
-      if (attempt === MAX_RETRIES) {
+      if (attempt === DEFAULT_MAX_RETRIES) {
         throw new DiscordError('Search index is not ready after retries', 'search_index_not_ready')
       }
 

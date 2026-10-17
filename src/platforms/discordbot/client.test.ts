@@ -226,7 +226,10 @@ describe('DiscordBotClient', () => {
       await client.sendMessage('ch1', 'Reply text', { reply_to: 'parent123' })
 
       expect(fetchCalls[0].options?.body).toBe(
-        JSON.stringify({ content: 'Reply text', message_reference: { message_id: 'parent123' } }),
+        JSON.stringify({
+          content: 'Reply text',
+          message_reference: { message_id: 'parent123', fail_if_not_exists: false },
+        }),
       )
     })
   })
@@ -397,7 +400,7 @@ describe('DiscordBotClient', () => {
       const formData = fetchCalls[0].options?.body as FormData
       expect(JSON.parse(formData.get('payload_json') as string)).toEqual({
         content: 'reply',
-        message_reference: { message_id: 'parent123' },
+        message_reference: { message_id: 'parent123', fail_if_not_exists: false },
         attachments: [{ id: 0, filename: 'test-discordbot-reply-file.txt' }],
       })
       expect(formData.get('files[0]')).toBeTruthy()
@@ -803,6 +806,49 @@ describe('DiscordBotClient', () => {
       const client = await new DiscordBotClient().login({ token: 'bot-token' })
       await expect(client.testAuth()).rejects.toThrow(DiscordBotError)
       expect(fetchCalls.length).toBeLessThanOrEqual(4)
+    })
+  })
+
+  describe('createDm / triggerTyping / respondToInteraction', () => {
+    it('createDm opens the DM channel with one user', async () => {
+      mockResponse({ id: 'dm1', type: 1 })
+      const client = await new DiscordBotClient().login({ token: 'bot-token' })
+      const channel = await client.createDm('u1')
+      expect(channel.id).toBe('dm1')
+      expect(fetchCalls[0].url).toBe('https://discord.com/api/v10/users/@me/channels')
+      expect(fetchCalls[0].options?.body).toBe(JSON.stringify({ recipient_id: 'u1' }))
+    })
+
+    it('triggerTyping posts to the typing endpoint', async () => {
+      mockResponse(null, 204)
+      const client = await new DiscordBotClient().login({ token: 'bot-token' })
+      await client.triggerTyping('ch1')
+      expect(fetchCalls[0].url).toBe('https://discord.com/api/v10/channels/ch1/typing')
+      expect(fetchCalls[0].options?.method).toBe('POST')
+    })
+
+    it('respondToInteraction defers a component tap by default', async () => {
+      mockResponse(null, 204)
+      const client = await new DiscordBotClient().login({ token: 'bot-token' })
+      await client.respondToInteraction('i1', 'tok')
+      expect(fetchCalls[0].url).toBe('https://discord.com/api/v10/interactions/i1/tok/callback')
+      expect(fetchCalls[0].options?.body).toBe(JSON.stringify({ type: 6 }))
+    })
+
+    it('a reply reference survives a deleted original', async () => {
+      mockResponse({
+        id: 'msg1',
+        channel_id: 'ch1',
+        author: { id: '123', username: 'bot' },
+        content: 'hi',
+        timestamp: '2024-01-01T00:00:00.000Z',
+      })
+      const client = await new DiscordBotClient().login({ token: 'bot-token' })
+      await client.createMessage('ch1', { content: 'hi', reply_to: 'orig' })
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({
+        content: 'hi',
+        message_reference: { message_id: 'orig', fail_if_not_exists: false },
+      })
     })
   })
 

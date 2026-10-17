@@ -328,6 +328,25 @@ export class DiscordBotClient {
     return this.request<void>('DELETE', `/channels/${channelId}/messages/${messageId}`)
   }
 
+  /** The bot's DM channel with one user (`POST /users/@me/channels`). */
+  async createDm(userId: string): Promise<DiscordChannel> {
+    return this.request<DiscordChannel>('POST', '/users/@me/channels', { recipient_id: userId })
+  }
+
+  /** Shows the typing indicator in a channel for about ten seconds. */
+  async triggerTyping(channelId: string): Promise<void> {
+    return this.request<void>('POST', `/channels/${channelId}/typing`)
+  }
+
+  /**
+   * Answers an interaction within its three-second window. The default
+   * `DEFERRED_UPDATE_MESSAGE` (6) acknowledges a component tap without
+   * changing the message.
+   */
+  async respondToInteraction(interactionId: string, interactionToken: string, type = 6): Promise<void> {
+    return this.request<void>('POST', `/interactions/${interactionId}/${interactionToken}/callback`, { type })
+  }
+
   async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     const encodedEmoji = encodeURIComponent(emoji)
     return this.request<void>('PUT', `/channels/${channelId}/messages/${messageId}/reactions/${encodedEmoji}/@me`)
