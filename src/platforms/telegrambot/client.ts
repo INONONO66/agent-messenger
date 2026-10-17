@@ -153,21 +153,21 @@ export class TelegramBotClient {
     const code = body.error_code
     const description = body.description ?? `HTTP error from ${method}`
     if (code === 401) {
-      throw new TelegramBotError(`Unauthorized: ${description}`, 'unauthorized')
+      throw new TelegramBotError(`Unauthorized: ${description}`, 'unauthorized', { httpStatus: code })
     }
     if (code === 409) {
-      throw new TelegramBotError(`Conflict: ${description}`, 'conflict')
+      throw new TelegramBotError(`Conflict: ${description}`, 'conflict', { httpStatus: code })
     }
     if (code === 403) {
-      throw new TelegramBotError(`Forbidden: ${description}`, 'forbidden')
+      throw new TelegramBotError(`Forbidden: ${description}`, 'forbidden', { httpStatus: code })
     }
     if (code === 400) {
-      throw new TelegramBotError(`Bad Request: ${description}`, 'bad_request')
+      throw new TelegramBotError(`Bad Request: ${description}`, 'bad_request', { httpStatus: code })
     }
     if (code === 404) {
-      throw new TelegramBotError(`Not Found: ${description}`, 'not_found')
+      throw new TelegramBotError(`Not Found: ${description}`, 'not_found', { httpStatus: code })
     }
-    throw new TelegramBotError(description, code !== undefined ? `http_${code}` : 'http_error')
+    throw new TelegramBotError(description, code !== undefined ? `http_${code}` : 'http_error', { httpStatus: code })
   }
 
   private async parseJsonOrRetry<T>(
@@ -239,7 +239,7 @@ export class TelegramBotClient {
           await this.sleep(retryAfter * 1000)
           continue
         }
-        throw new TelegramBotError(body.description ?? 'Rate limited', 'rate_limited')
+        throw new TelegramBotError(body.description ?? 'Rate limited', 'rate_limited', { httpStatus: 429, retryAfter })
       }
 
       if (response.status >= 500 && attempt < this.maxRetries) {
@@ -297,7 +297,7 @@ export class TelegramBotClient {
           await this.sleep(retryAfter * 1000)
           continue
         }
-        throw new TelegramBotError(body.description ?? 'Rate limited', 'rate_limited')
+        throw new TelegramBotError(body.description ?? 'Rate limited', 'rate_limited', { httpStatus: 429, retryAfter })
       }
 
       if (response.status >= 500 && attempt < this.maxRetries) {

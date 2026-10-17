@@ -140,12 +140,14 @@ export class DiscordBotClient {
       throw new DiscordBotError(
         'File(s) too large for this server upload limit (Discord error 40005)',
         errorBody.code?.toString() ?? 'http_413',
+        { httpStatus: response.status },
       )
     }
 
     throw new DiscordBotError(
       (errorBody.message as string) || `HTTP ${response.status}`,
       errorBody.code?.toString() || `http_${response.status}`,
+      { httpStatus: response.status },
     )
   }
 
@@ -188,7 +190,10 @@ export class DiscordBotClient {
           continue
         }
         const errorBody = await response.json().catch(() => ({}))
-        throw new DiscordBotError((errorBody as Record<string, string>).message || 'Rate limited', 'rate_limited')
+        throw new DiscordBotError((errorBody as Record<string, string>).message || 'Rate limited', 'rate_limited', {
+          httpStatus: 429,
+          retryAfter: parseFloat(response.headers.get('Retry-After') || '1'),
+        })
       }
 
       if (response.status >= 500 && attempt < this.maxRetries) {
@@ -248,7 +253,10 @@ export class DiscordBotClient {
           continue
         }
         const errorBody = await response.json().catch(() => ({}))
-        throw new DiscordBotError((errorBody as Record<string, string>).message || 'Rate limited', 'rate_limited')
+        throw new DiscordBotError((errorBody as Record<string, string>).message || 'Rate limited', 'rate_limited', {
+          httpStatus: 429,
+          retryAfter: parseFloat(response.headers.get('Retry-After') || '1'),
+        })
       }
 
       if (response.status >= 500 && attempt < this.maxRetries) {
