@@ -830,7 +830,7 @@ describe('DiscordBotClient', () => {
       mockResponse({ message: 'Internal Server Error' }, 500)
 
       const client = await new DiscordBotClient({ retries: 0 }).login({ token: 'bot-token' })
-      await expect(client.testAuth()).rejects.toThrow(DiscordBotError)
+      await expect(client.testAuth()).rejects.toMatchObject({ code: 'http_500', httpStatus: 500 })
       expect(fetchCalls.length).toBe(1)
     })
 
@@ -838,7 +838,7 @@ describe('DiscordBotClient', () => {
       mockResponse({ message: 'Rate limited' }, 429, { 'Retry-After': '0' })
 
       const client = await new DiscordBotClient({ retries: 0 }).login({ token: 'bot-token' })
-      await expect(client.testAuth()).rejects.toMatchObject({ code: 'rate_limited' })
+      await expect(client.testAuth()).rejects.toMatchObject({ code: 'rate_limited', httpStatus: 429, retryAfter: 0 })
       expect(fetchCalls.length).toBe(1)
     })
 

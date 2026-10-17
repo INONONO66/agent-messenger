@@ -19,11 +19,17 @@ export interface TelegramBotCredentials {
 
 export class TelegramBotError extends Error {
   code: string
+  /** Telegram `error_code` (an HTTP status) of the refused response, when the error came from one. */
+  httpStatus?: number
+  /** Seconds the platform asked us to wait, on a `rate_limited` error. */
+  retryAfter?: number
 
-  constructor(message: string, code: string) {
+  constructor(message: string, code: string, details?: { httpStatus?: number; retryAfter?: number }) {
     super(message)
     this.name = 'TelegramBotError'
     this.code = code
+    if (details?.httpStatus !== undefined) this.httpStatus = details.httpStatus
+    if (details?.retryAfter !== undefined) this.retryAfter = details.retryAfter
   }
 }
 

@@ -448,7 +448,7 @@ describe('TelegramBotClient', () => {
       mockApiError(429, 'Too Many Requests', { retry_after: 30 })
 
       const client = await new TelegramBotClient({ retries: 0 }).login({ token: 'TOKEN' })
-      await expect(client.getMe()).rejects.toMatchObject({ code: 'rate_limited' })
+      await expect(client.getMe()).rejects.toMatchObject({ code: 'rate_limited', httpStatus: 429, retryAfter: 30 })
       expect(fetchCalls).toHaveLength(1)
     })
 
