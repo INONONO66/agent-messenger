@@ -23,11 +23,17 @@ export interface DiscordBotCredentials {
 
 export class DiscordBotError extends Error {
   code: string
+  /** HTTP status of the refused response, when the error came from one. */
+  httpStatus?: number
+  /** Seconds the platform asked us to wait, on a `rate_limited` error. */
+  retryAfter?: number
 
-  constructor(message: string, code: string) {
+  constructor(message: string, code: string, details?: { httpStatus?: number; retryAfter?: number }) {
     super(message)
     this.name = 'DiscordBotError'
     this.code = code
+    if (details?.httpStatus !== undefined) this.httpStatus = details.httpStatus
+    if (details?.retryAfter !== undefined) this.retryAfter = details.retryAfter
   }
 }
 
@@ -70,10 +76,18 @@ export interface DiscordMessage {
   thread?: DiscordChannel
 }
 
-export interface DiscordAttachmentInput {
-  path: string
-  filename?: string
+/** Bytes already in memory, for callers that never touch the local disk. */
+export interface DiscordFileData {
+  data: Uint8Array
+  filename: string
+  /** Content type of the part; Discord sniffs when absent. */
+  contentType?: string
 }
+
+/** One attachment to send: a path on disk, or bytes with their filename. */
+export type DiscordAttachmentInput =
+  | { path: string; filename?: string; data?: never }
+  | (DiscordFileData & { path?: never })
 
 export interface DiscordCreateMessageOptions {
   content?: string
