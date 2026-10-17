@@ -147,6 +147,81 @@ describe('DiscordClient', () => {
     })
   })
 
+  describe('retries option', () => {
+    it('retries: 0 makes a 500 a single physical attempt', async () => {
+      mockResponse({ message: 'Internal Server Error' }, 500)
+      const client = await new DiscordClient({ retries: 0 }).login({ token: 'test-token' })
+      await expect(client.testAuth()).rejects.toMatchObject({ code: 'http_500', httpStatus: 500 })
+      expect(fetchCalls.length).toBe(1)
+    })
+
+    it('retries: 0 surfaces a 429 without re-sending', async () => {
+      mockResponse({ message: 'Rate limited' }, 429, { 'Retry-After': '2' })
+      const client = await new DiscordClient({ retries: 0 }).login({ token: 'test-token' })
+      await expect(client.testAuth()).rejects.toMatchObject({ code: 'rate_limited', httpStatus: 429, retryAfter: 2 })
+      expect(fetchCalls.length).toBe(1)
+    })
+
+    it('rejects a negative retries option', () => {
+      expect(() => new DiscordClient({ retries: -1 })).toThrow('retries must be a non-negative integer')
+    })
+  })
+
+  describe('createMessage', () => {
+    const created = {
+      id: 'msg1',
+      channel_id: 'ch1',
+      author: { id: '123', username: 'me' },
+      content: '',
+      timestamp: '2024-01-01T00:00:00.000Z',
+    }
+
+    it('sends a text reply as JSON that survives a deleted original', async () => {
+      mockResponse({ ...created, content: 'hi' })
+      const client = await new DiscordClient().login({ token: 'test-token' })
+      const message = await client.createMessage('ch1', { content: 'hi', reply_to: 'orig' })
+      expect(message.id).toBe('msg1')
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({
+        content: 'hi',
+        message_reference: { message_id: 'orig', fail_if_not_exists: false },
+      })
+    })
+
+    it('sends bytes as multipart beside payload_json', async () => {
+      mockResponse(created)
+      const client = await new DiscordClient().login({ token: 'test-token' })
+      await client.createMessage('ch1', {
+        content: 'see',
+        files: [{ data: new TextEncoder().encode('a,b'), filename: 'r.csv', contentType: 'text/csv' }],
+      })
+      const form = fetchCalls[0].options?.body as FormData
+      const part = form.get('files[0]') as File
+      expect(part.name).toBe('r.csv')
+      expect(part.type.startsWith('text/csv')).toBe(true)
+      expect(await part.text()).toBe('a,b')
+      expect(JSON.parse(form.get('payload_json') as string)).toEqual({
+        content: 'see',
+        attachments: [{ id: 0, filename: 'r.csv' }],
+      })
+    })
+
+    it('refuses an empty message before any request', async () => {
+      const client = await new DiscordClient().login({ token: 'test-token' })
+      await expect(client.createMessage('ch1', { content: ' ' })).rejects.toMatchObject({ code: 'empty_message' })
+      expect(fetchCalls.length).toBe(0)
+    })
+  })
+
+  describe('triggerTyping', () => {
+    it('posts to the channel typing endpoint', async () => {
+      mockResponse(null, 204)
+      const client = await new DiscordClient().login({ token: 'test-token' })
+      await client.triggerTyping('ch1')
+      expect(fetchCalls[0].url).toBe('https://discord.com/api/v10/channels/ch1/typing')
+      expect(fetchCalls[0].options?.method).toBe('POST')
+    })
+  })
+
   describe('sendMessage', () => {
     it('sends message to channel', async () => {
       mockResponse({
@@ -387,7 +462,12 @@ describe('DiscordClient', () => {
 
       const client = await new DiscordClient().login({ token: 'test-token' })
 
-      await expect(client.getMyGuildMember('guild-1')).rejects.toEqual(new DiscordError('Unknown Guild', '10004'))
+      await expect(client.getMyGuildMember('guild-1')).rejects.toMatchObject({
+        name: 'DiscordError',
+        message: 'Unknown Guild',
+        code: '10004',
+        httpStatus: 404,
+      })
       expect(fetchCalls).toHaveLength(1)
     })
   })

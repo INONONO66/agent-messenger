@@ -40,7 +40,8 @@ export async function createMessage(
   const payload: Record<string, unknown> = {}
 
   if (options.content !== undefined) payload.content = options.content
-  if (options.reply_to !== undefined) payload.message_reference = { message_id: options.reply_to }
+  if (options.reply_to !== undefined)
+    payload.message_reference = { message_id: options.reply_to, fail_if_not_exists: false }
 
   if (files.length === 0) return request<DiscordMessage>('POST', `/channels/${target}/messages`, payload)
 
