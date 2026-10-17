@@ -1,4 +1,5 @@
 export { DiscordBotClient } from './client'
+export type { DiscordBotClientOptions } from './client'
 export { DiscordBotCredentialManager } from './credential-manager'
 export { DiscordBotListener } from './listener'
 export type { DiscordBotListenerOptions } from './listener'
@@ -11,6 +12,7 @@ export type {
   DiscordBotListenerEventMap,
   DiscordChannel,
   DiscordFile,
+  DiscordFileData,
   DiscordGatewayChannelEvent,
   DiscordGatewayEmbed,
   DiscordGatewayEvent,

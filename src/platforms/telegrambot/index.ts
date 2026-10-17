@@ -7,6 +7,10 @@ export type {
   EditMessageTextTarget,
   GetUpdatesOptions,
   SendMessageOptions,
+  TelegramBotClientOptions,
+  TelegramChatAction,
+  TelegramFile,
+  TelegramFileData,
 } from './client'
 export { TelegramBotCredentialManager } from './credential-manager'
 export { TelegramBotListener } from './listener'

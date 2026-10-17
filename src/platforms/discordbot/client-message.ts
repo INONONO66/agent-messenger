@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 
-import type { DiscordCreateMessageOptions, DiscordFile, DiscordMessage } from './types'
+import type { DiscordCreateMessageOptions, DiscordFile, DiscordFileData, DiscordMessage } from './types'
 import { DiscordBotError } from './types'
 
 type Request = <T>(method: string, path: string, body?: unknown) => Promise<T>
@@ -30,7 +30,11 @@ export async function createMessage(
     ) {
       throw new DiscordBotError('Invalid filename', 'invalid_filename')
     }
-    return (file.filename ?? file.path).replaceAll('\\', '/').split('/').pop() || 'file'
+    const named = file.filename ?? file.path
+    if (named === undefined || named === '') {
+      throw new DiscordBotError('Invalid filename', 'invalid_filename')
+    }
+    return named.replaceAll('\\', '/').split('/').pop() || 'file'
   })
   const target = options.thread_id ?? channelId
   const payload: Record<string, unknown> = {}
@@ -46,7 +50,12 @@ export async function createMessage(
     JSON.stringify({ ...payload, attachments: files.map((_, index) => ({ id: index, filename: partNames[index] })) }),
   )
   for (const [index, file] of files.entries()) {
-    formData.append(`files[${index}]`, new Blob([await readFile(file.path)]), partNames[index])
+    const bytes = file.data ?? (await readFile(file.path as string))
+    const blob =
+      file.data !== undefined && file.contentType !== undefined
+        ? new Blob([bytes], { type: file.contentType })
+        : new Blob([bytes])
+    formData.append(`files[${index}]`, blob, partNames[index])
   }
   return requestFormData<DiscordMessage>(`/channels/${target}/messages`, formData)
 }
@@ -54,12 +63,16 @@ export async function createMessage(
 export async function uploadFile(
   create: (channelId: string, options: DiscordCreateMessageOptions) => Promise<DiscordMessage>,
   channelId: string,
-  filePath: string,
+  file: string | DiscordFileData,
   options?: { content?: string; filename?: string; reply_to?: string; thread_id?: string },
 ): Promise<DiscordFile> {
   const message = await create(channelId, {
     content: options?.content,
-    files: [{ path: filePath, filename: options?.filename }],
+    files: [
+      typeof file === 'string'
+        ? { path: file, filename: options?.filename }
+        : { ...file, filename: options?.filename ?? file.filename },
+    ],
     reply_to: options?.reply_to,
     thread_id: options?.thread_id,
   })

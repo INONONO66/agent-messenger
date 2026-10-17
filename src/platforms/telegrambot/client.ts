@@ -12,8 +12,46 @@ import type {
 import { TelegramBotError } from './types'
 
 const BASE_URL = 'https://api.telegram.org'
-const MAX_RETRIES = 3
+const DEFAULT_MAX_RETRIES = 3
 const BASE_BACKOFF_MS = 100
+
+export interface TelegramBotClientOptions {
+  /**
+   * How many times a request is re-sent after a network error, a 429 or a
+   * 5xx before the error surfaces. `0` makes every call a single physical
+   * attempt, for callers that own idempotency themselves. Defaults to 3.
+   */
+  retries?: number
+}
+
+/** Bytes already in memory, for callers that never touch the local disk. */
+export interface TelegramFileData {
+  data: Uint8Array
+  filename: string
+  contentType?: string
+}
+
+/** Chat actions `sendChatAction` accepts (Bot API 7+). */
+export type TelegramChatAction =
+  | 'typing'
+  | 'upload_photo'
+  | 'record_video'
+  | 'upload_video'
+  | 'record_voice'
+  | 'upload_voice'
+  | 'upload_document'
+  | 'choose_sticker'
+  | 'find_location'
+  | 'record_video_note'
+  | 'upload_video_note'
+
+export interface TelegramFile {
+  file_id: string
+  file_unique_id: string
+  file_size?: number
+  /** Relative path to pass to `fileUrl`; absent when the file is too large to download. */
+  file_path?: string
+}
 
 interface ApiResponse<T> {
   ok: boolean
@@ -62,6 +100,15 @@ export type ChatId = number | string
 
 export class TelegramBotClient {
   private token: string | null = null
+  private readonly maxRetries: number
+
+  constructor(options?: TelegramBotClientOptions) {
+    const retries = options?.retries ?? DEFAULT_MAX_RETRIES
+    if (!Number.isInteger(retries) || retries < 0) {
+      throw new TelegramBotError('retries must be a non-negative integer', 'invalid_retries')
+    }
+    this.maxRetries = retries
+  }
 
   async login(credentials?: { token: string }): Promise<this> {
     if (credentials) {
@@ -133,7 +180,7 @@ export class TelegramBotClient {
       return { body }
     } catch {
       // 5xx responses sometimes return HTML/empty bodies; allow retry instead of failing fast.
-      if (response.status >= 500 && attempt < MAX_RETRIES) {
+      if (response.status >= 500 && attempt < this.maxRetries) {
         return { retry: true }
       }
       throw new TelegramBotError(`Invalid JSON response from ${method} (HTTP ${response.status})`, 'invalid_response')
@@ -152,7 +199,7 @@ export class TelegramBotClient {
     const url = this.buildUrl(method)
     let lastError: Error | undefined
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (signal?.aborted) {
         throw Object.assign(new Error('Aborted'), { name: 'AbortError' })
       }
@@ -172,7 +219,7 @@ export class TelegramBotClient {
           throw error instanceof Error ? error : Object.assign(new Error('Aborted'), { name: 'AbortError' })
         }
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
@@ -188,14 +235,14 @@ export class TelegramBotClient {
 
       if (response.status === 429 || body.error_code === 429) {
         const retryAfter = body.parameters?.retry_after ?? 1
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.sleep(retryAfter * 1000)
           continue
         }
         throw new TelegramBotError(body.description ?? 'Rate limited', 'rate_limited')
       }
 
-      if (response.status >= 500 && attempt < MAX_RETRIES) {
+      if (response.status >= 500 && attempt < this.maxRetries) {
         await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
         continue
       }
@@ -217,7 +264,7 @@ export class TelegramBotClient {
     const url = this.buildUrl(method)
     let lastError: Error | undefined
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (signal?.aborted) {
         throw Object.assign(new Error('Aborted'), { name: 'AbortError' })
       }
@@ -230,7 +277,7 @@ export class TelegramBotClient {
           throw error instanceof Error ? error : Object.assign(new Error('Aborted'), { name: 'AbortError' })
         }
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
@@ -246,14 +293,14 @@ export class TelegramBotClient {
 
       if (response.status === 429 || body.error_code === 429) {
         const retryAfter = body.parameters?.retry_after ?? 1
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.sleep(retryAfter * 1000)
           continue
         }
         throw new TelegramBotError(body.description ?? 'Rate limited', 'rate_limited')
       }
 
-      if (response.status >= 500 && attempt < MAX_RETRIES) {
+      if (response.status >= 500 && attempt < this.maxRetries) {
         await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
         continue
       }
@@ -269,6 +316,30 @@ export class TelegramBotClient {
     }
 
     throw lastError ?? new TelegramBotError('Request failed after retries', 'max_retries')
+  }
+
+  /** One multipart body for `sendPhoto`/`sendDocument`: the media part plus the plain fields. */
+  private async mediaForm(
+    field: 'photo' | 'document',
+    chatId: ChatId,
+    file: string | TelegramFileData,
+    options?: { caption?: string; parse_mode?: SendMessageOptions['parse_mode']; message_thread_id?: number },
+  ): Promise<FormData> {
+    const bytes = typeof file === 'string' ? await readFile(file) : file.data
+    const filename = typeof file === 'string' ? file.split('/').pop() || 'file' : file.filename
+    const blob =
+      typeof file !== 'string' && file.contentType !== undefined
+        ? new Blob([bytes], { type: file.contentType })
+        : new Blob([bytes])
+
+    const formData = new FormData()
+    formData.append('chat_id', String(chatId))
+    formData.append(field, blob, filename)
+    if (options?.caption !== undefined) formData.append('caption', options.caption)
+    if (options?.parse_mode !== undefined) formData.append('parse_mode', options.parse_mode)
+    if (options?.message_thread_id !== undefined)
+      formData.append('message_thread_id', String(options.message_thread_id))
+    return formData
   }
 
   async getMe(): Promise<TelegramBotUser> {
@@ -291,29 +362,84 @@ export class TelegramBotClient {
     return this.call<TelegramMessage>('sendMessage', { chat_id: chatId, text, ...options })
   }
 
+  /**
+   * Send a photo. `photo` is an https URL or a Telegram `file_id` (sent as
+   * JSON), or `{ data, filename }` bytes (sent as multipart).
+   */
   async sendPhoto(
     chatId: ChatId,
-    photo: string,
-    options?: { caption?: string; parse_mode?: SendMessageOptions['parse_mode'] },
+    photo: string | TelegramFileData,
+    options?: {
+      caption?: string
+      parse_mode?: SendMessageOptions['parse_mode']
+      message_thread_id?: number
+      signal?: AbortSignal
+    },
   ): Promise<TelegramMessage> {
-    return this.call<TelegramMessage>('sendPhoto', { chat_id: chatId, photo, ...options })
+    const { signal, ...fields } = options ?? {}
+    if (typeof photo === 'string') {
+      return this.call<TelegramMessage>('sendPhoto', { chat_id: chatId, photo, ...fields }, signal)
+    }
+    const formData = await this.mediaForm('photo', chatId, photo, fields)
+    return this.callMultipart<TelegramMessage>('sendPhoto', formData, signal)
   }
 
+  /** Send a document: a path on disk, or `{ data, filename }` bytes. Always multipart. */
   async sendDocument(
     chatId: ChatId,
-    filePath: string,
-    options?: { caption?: string; parse_mode?: SendMessageOptions['parse_mode']; signal?: AbortSignal },
+    file: string | TelegramFileData,
+    options?: {
+      caption?: string
+      parse_mode?: SendMessageOptions['parse_mode']
+      message_thread_id?: number
+      signal?: AbortSignal
+    },
   ): Promise<TelegramMessage> {
-    const fileBuffer = await readFile(filePath)
-    const filename = filePath.split('/').pop() || 'file'
+    const { signal, ...fields } = options ?? {}
+    const formData = await this.mediaForm('document', chatId, file, fields)
+    return this.callMultipart<TelegramMessage>('sendDocument', formData, signal)
+  }
 
-    const formData = new FormData()
-    formData.append('chat_id', String(chatId))
-    formData.append('document', new Blob([new Uint8Array(fileBuffer)]), filename)
-    if (options?.caption !== undefined) formData.append('caption', options.caption)
-    if (options?.parse_mode !== undefined) formData.append('parse_mode', options.parse_mode)
+  /** Show a chat action ("typing…") for about five seconds or until the next message. */
+  async sendChatAction(
+    chatId: ChatId,
+    action: TelegramChatAction,
+    options?: { message_thread_id?: number; signal?: AbortSignal },
+  ): Promise<boolean> {
+    const { signal, ...fields } = options ?? {}
+    return this.call<boolean>('sendChatAction', { chat_id: chatId, action, ...fields }, signal)
+  }
 
-    return this.callMultipart<TelegramMessage>('sendDocument', formData, options?.signal)
+  /** Acknowledge an inline-keyboard callback; without it the client shows a spinner for up to a minute. */
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    options?: { text?: string; show_alert?: boolean; url?: string; cache_time?: number; signal?: AbortSignal },
+  ): Promise<boolean> {
+    const { signal, ...fields } = options ?? {}
+    return this.call<boolean>('answerCallbackQuery', { callback_query_id: callbackQueryId, ...fields }, signal)
+  }
+
+  /** Resolve a `file_id` to its download path (`getFile`); pass the result to `fileUrl` or `downloadFile`. */
+  async getFile(fileId: string, signal?: AbortSignal): Promise<TelegramFile> {
+    return this.call<TelegramFile>('getFile', { file_id: fileId }, signal)
+  }
+
+  /** The authenticated download URL for a `getFile` result. */
+  fileUrl(file: Pick<TelegramFile, 'file_path'>): string {
+    if (file.file_path === undefined) {
+      throw new TelegramBotError('File has no download path (too large, or getFile not called)', 'no_download_path')
+    }
+    return `${BASE_URL}/file/bot${this.ensureAuth()}/${file.file_path}`
+  }
+
+  /** Download a file's bytes by `file_id`: one `getFile` plus one fetch of the file URL. */
+  async downloadFile(fileId: string, signal?: AbortSignal): Promise<{ buffer: Buffer; file: TelegramFile }> {
+    const file = await this.getFile(fileId, signal)
+    const response = await fetch(this.fileUrl(file), { signal })
+    if (!response.ok) {
+      throw new TelegramBotError(`Failed to download file: HTTP ${response.status}`, `http_${response.status}`)
+    }
+    return { buffer: Buffer.from(await response.arrayBuffer()), file }
   }
 
   async forwardMessage(

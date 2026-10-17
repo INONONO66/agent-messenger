@@ -526,6 +526,35 @@ describe('DiscordBotClient', () => {
       expect(headers.Authorization).toBe('Bot bot-token')
     })
 
+    it('uploads bytes without touching the disk', async () => {
+      mockResponse({
+        id: 'msg1',
+        channel_id: 'ch1',
+        author: { id: '123', username: 'bot' },
+        content: '',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        attachments: [{ id: 'att1', filename: 'report.csv', size: 3, url: 'https://cdn.discord.com/att1/report.csv' }],
+      })
+
+      const client = await new DiscordBotClient().login({ token: 'bot-token' })
+      const file = await client.uploadFile(
+        'ch1',
+        { data: new TextEncoder().encode('a,b'), filename: 'report.csv', contentType: 'text/csv' },
+        { content: 'here' },
+      )
+
+      expect(file.filename).toBe('report.csv')
+      const form = fetchCalls[0].options?.body as FormData
+      const part = form.get('files[0]') as File
+      expect(part.name).toBe('report.csv')
+      expect(part.type).toBe('text/csv')
+      expect(await part.text()).toBe('a,b')
+      expect(JSON.parse(form.get('payload_json') as string)).toEqual({
+        content: 'here',
+        attachments: [{ id: 0, filename: 'report.csv' }],
+      })
+    })
+
     it('throws when response has no attachments', async () => {
       const { tmpdir } = await import('node:os')
       const { join } = await import('node:path')
@@ -795,6 +824,27 @@ describe('DiscordBotClient', () => {
       const client = await new DiscordBotClient().login({ token: 'bot-token' })
       await expect(client.testAuth()).rejects.toThrow(DiscordBotError)
       expect(fetchCalls.length).toBe(1)
+    })
+
+    it('retries: 0 makes a 500 a single physical attempt', async () => {
+      mockResponse({ message: 'Internal Server Error' }, 500)
+
+      const client = await new DiscordBotClient({ retries: 0 }).login({ token: 'bot-token' })
+      await expect(client.testAuth()).rejects.toThrow(DiscordBotError)
+      expect(fetchCalls.length).toBe(1)
+    })
+
+    it('retries: 0 surfaces a 429 without re-sending', async () => {
+      mockResponse({ message: 'Rate limited' }, 429, { 'Retry-After': '0' })
+
+      const client = await new DiscordBotClient({ retries: 0 }).login({ token: 'bot-token' })
+      await expect(client.testAuth()).rejects.toMatchObject({ code: 'rate_limited' })
+      expect(fetchCalls.length).toBe(1)
+    })
+
+    it('rejects a negative or fractional retries option', () => {
+      expect(() => new DiscordBotClient({ retries: -1 })).toThrow(DiscordBotError)
+      expect(() => new DiscordBotClient({ retries: 1.5 })).toThrow('retries must be a non-negative integer')
     })
 
     it('exponential backoff increases delay', async () => {

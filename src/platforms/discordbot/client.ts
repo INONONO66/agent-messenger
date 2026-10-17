@@ -9,6 +9,7 @@ import type {
   DiscordChannel,
   DiscordCreateMessageOptions,
   DiscordFile,
+  DiscordFileData,
   DiscordGuild,
   DiscordMessage,
   DiscordUser,
@@ -16,8 +17,17 @@ import type {
 import { DiscordBotError } from './types'
 
 const BASE_URL = 'https://discord.com/api/v10'
-const MAX_RETRIES = 3
+const DEFAULT_MAX_RETRIES = 3
 const BASE_BACKOFF_MS = 100
+
+export interface DiscordBotClientOptions {
+  /**
+   * How many times a request is re-sent after a network error, a 429 or a
+   * 5xx before the error surfaces. `0` makes every call a single physical
+   * attempt, for callers that own idempotency themselves. Defaults to 3.
+   */
+  retries?: number
+}
 
 interface RateLimitBucket {
   remaining: number
@@ -29,6 +39,15 @@ export class DiscordBotClient {
   private token: string | null = null
   private buckets: Map<string, RateLimitBucket> = new Map()
   private globalRateLimitUntil: number = 0
+  private readonly maxRetries: number
+
+  constructor(options?: DiscordBotClientOptions) {
+    const retries = options?.retries ?? DEFAULT_MAX_RETRIES
+    if (!Number.isInteger(retries) || retries < 0) {
+      throw new DiscordBotError('retries must be a non-negative integer', 'invalid_retries')
+    }
+    this.maxRetries = retries
+  }
 
   async login(credentials?: { token: string }): Promise<this> {
     if (credentials) {
@@ -135,7 +154,7 @@ export class DiscordBotClient {
     const bucketKey = this.getBucketKey(method, path)
     let lastError: Error | undefined
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       await this.waitForRateLimit(bucketKey)
 
       const headers: Record<string, string> = this.getHeaders()
@@ -154,7 +173,7 @@ export class DiscordBotClient {
         response = await fetch(url, options)
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
@@ -164,7 +183,7 @@ export class DiscordBotClient {
       this.updateBucket(bucketKey, response)
 
       if (response.status === 429) {
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.handleRateLimitResponse(response)
           continue
         }
@@ -172,7 +191,7 @@ export class DiscordBotClient {
         throw new DiscordBotError((errorBody as Record<string, string>).message || 'Rate limited', 'rate_limited')
       }
 
-      if (response.status >= 500 && attempt < MAX_RETRIES) {
+      if (response.status >= 500 && attempt < this.maxRetries) {
         await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
         continue
       }
@@ -197,7 +216,7 @@ export class DiscordBotClient {
     const bucketKey = this.getBucketKey('POST', path)
     let lastError: Error | undefined
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       await this.waitForRateLimit(bucketKey)
 
       const headers: Record<string, string> = {
@@ -214,7 +233,7 @@ export class DiscordBotClient {
         })
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
@@ -224,7 +243,7 @@ export class DiscordBotClient {
       this.updateBucket(bucketKey, response)
 
       if (response.status === 429) {
-        if (attempt < MAX_RETRIES) {
+        if (attempt < this.maxRetries) {
           await this.handleRateLimitResponse(response)
           continue
         }
@@ -232,7 +251,7 @@ export class DiscordBotClient {
         throw new DiscordBotError((errorBody as Record<string, string>).message || 'Rate limited', 'rate_limited')
       }
 
-      if (response.status >= 500 && attempt < MAX_RETRIES) {
+      if (response.status >= 500 && attempt < this.maxRetries) {
         await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
         continue
       }
@@ -323,17 +342,16 @@ export class DiscordBotClient {
     return this.request<DiscordUser>('GET', `/users/${userId}`)
   }
 
+  /**
+   * Upload one file as a message attachment. `file` is a path on disk, or
+   * `{ data, filename }` for bytes already in memory.
+   */
   async uploadFile(
     channelId: string,
-    filePath: string,
+    file: string | DiscordFileData,
     options?: { content?: string; filename?: string; reply_to?: string; thread_id?: string },
   ): Promise<DiscordFile> {
-    return uploadFileHelper(
-      (id, messageOptions) => this.createMessage(id, messageOptions),
-      channelId,
-      filePath,
-      options,
-    )
+    return uploadFileHelper((id, messageOptions) => this.createMessage(id, messageOptions), channelId, file, options)
   }
 
   async listFiles(channelId: string): Promise<DiscordFile[]> {

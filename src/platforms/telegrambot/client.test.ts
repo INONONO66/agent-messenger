@@ -435,6 +435,115 @@ describe('TelegramBotClient', () => {
     })
   })
 
+  describe('retries option', () => {
+    it('retries: 0 makes a 502 a single physical attempt', async () => {
+      fetchResponses.push(new Response('<html>502</html>', { status: 502, headers: { 'Content-Type': 'text/html' } }))
+
+      const client = await new TelegramBotClient({ retries: 0 }).login({ token: 'TOKEN' })
+      await expect(client.getMe()).rejects.toMatchObject({ code: 'invalid_response' })
+      expect(fetchCalls).toHaveLength(1)
+    })
+
+    it('retries: 0 surfaces a 429 without sleeping on retry_after', async () => {
+      mockApiError(429, 'Too Many Requests', { retry_after: 30 })
+
+      const client = await new TelegramBotClient({ retries: 0 }).login({ token: 'TOKEN' })
+      await expect(client.getMe()).rejects.toMatchObject({ code: 'rate_limited' })
+      expect(fetchCalls).toHaveLength(1)
+    })
+
+    it('rejects a negative retries option', () => {
+      expect(() => new TelegramBotClient({ retries: -1 })).toThrow('retries must be a non-negative integer')
+    })
+  })
+
+  describe('byte uploads', () => {
+    it('sendDocument accepts bytes with a filename and content type', async () => {
+      mockOk({ message_id: 7, chat: { id: 1, type: 'private' }, date: 0 })
+
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendDocument(
+        1,
+        { data: new TextEncoder().encode('hello'), filename: 'note.txt', contentType: 'text/plain' },
+        { caption: 'c', message_thread_id: 9 },
+      )
+
+      expect(fetchCalls[0].url).toBe('https://api.telegram.org/botTOKEN/sendDocument')
+      const form = fetchCalls[0].options?.body as FormData
+      const part = form.get('document') as File
+      expect(part.name).toBe('note.txt')
+      expect(part.type.startsWith('text/plain')).toBe(true)
+      expect(await part.text()).toBe('hello')
+      expect(form.get('caption')).toBe('c')
+      expect(form.get('message_thread_id')).toBe('9')
+    })
+
+    it('sendPhoto sends bytes as multipart and a string as JSON', async () => {
+      mockOk({ message_id: 1, chat: { id: 1, type: 'private' }, date: 0 })
+      mockOk({ message_id: 2, chat: { id: 1, type: 'private' }, date: 0 })
+
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendPhoto(1, { data: new Uint8Array([1, 2, 3]), filename: 'a.png' })
+      await client.sendPhoto(1, 'https://example.com/a.png', { caption: 'x' })
+
+      const form = fetchCalls[0].options?.body as FormData
+      expect((form.get('photo') as File).name).toBe('a.png')
+      expect(JSON.parse(fetchCalls[1].options?.body as string)).toEqual({
+        chat_id: 1,
+        photo: 'https://example.com/a.png',
+        caption: 'x',
+      })
+    })
+  })
+
+  describe('sendChatAction / answerCallbackQuery / getFile', () => {
+    it('sendChatAction posts the action', async () => {
+      mockOk(true)
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      expect(await client.sendChatAction(5, 'typing', { message_thread_id: 2 })).toBe(true)
+      expect(fetchCalls[0].url).toBe('https://api.telegram.org/botTOKEN/sendChatAction')
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({
+        chat_id: 5,
+        action: 'typing',
+        message_thread_id: 2,
+      })
+    })
+
+    it('answerCallbackQuery posts the id and the optional text', async () => {
+      mockOk(true)
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      expect(await client.answerCallbackQuery('cb1', { text: 'done' })).toBe(true)
+      expect(fetchCalls[0].url).toBe('https://api.telegram.org/botTOKEN/answerCallbackQuery')
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({ callback_query_id: 'cb1', text: 'done' })
+    })
+
+    it('getFile resolves the path and fileUrl builds the download URL', async () => {
+      mockOk({ file_id: 'f1', file_unique_id: 'u1', file_size: 3, file_path: 'documents/file_1.txt' })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      const file = await client.getFile('f1')
+      expect(file.file_path).toBe('documents/file_1.txt')
+      expect(client.fileUrl(file)).toBe('https://api.telegram.org/file/botTOKEN/documents/file_1.txt')
+      expect(() => client.fileUrl({})).toThrow(TelegramBotError)
+    })
+
+    it('downloadFile fetches the bytes behind a file_id', async () => {
+      mockOk({ file_id: 'f1', file_unique_id: 'u1', file_path: 'photos/p.jpg' })
+      fetchResponses.push(new Response('JPEGDATA', { status: 200 }))
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      const { buffer, file } = await client.downloadFile('f1')
+      expect(buffer.toString()).toBe('JPEGDATA')
+      expect(file.file_id).toBe('f1')
+      expect(fetchCalls[1].url).toBe('https://api.telegram.org/file/botTOKEN/photos/p.jpg')
+    })
+
+    it('downloadFile surfaces a refused download as a typed error', async () => {
+      mockOk({ file_id: 'f1', file_unique_id: 'u1', file_path: 'photos/p.jpg' })
+      fetchResponses.push(new Response('nope', { status: 404 }))
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await expect(client.downloadFile('f1')).rejects.toMatchObject({ code: 'http_404' })
+    })
+  })
+
   describe('5xx retry', () => {
     it('retries 502 with non-JSON body and succeeds on next attempt', async () => {
       fetchResponses.push(
