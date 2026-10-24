@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { checkDownloadSize, downloadRequest, type DownloadOptions, readDownload } from '../../shared/download'
 
 import type {
   TelegramBotUser,
@@ -223,7 +224,7 @@ export class TelegramBotClient {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
-        throw new TelegramBotError(`Network error: ${lastError.message}`, 'network_error')
+        throw new TelegramBotError(`Network error: ${lastError.message}`, 'network_error', { cause: lastError })
       }
 
       const parsed = await this.parseJsonOrRetry<T>(response, method, attempt)
@@ -232,6 +233,9 @@ export class TelegramBotClient {
         continue
       }
       const { body } = parsed
+
+      if (response.status >= 500 && attempt === this.maxRetries)
+        throw new TelegramBotError(body.description ?? `HTTP ${response.status}`, `http_${response.status}`, { httpStatus: response.status })
 
       if (response.status === 429 || body.error_code === 429) {
         const retryAfter = body.parameters?.retry_after ?? 1
@@ -281,7 +285,7 @@ export class TelegramBotClient {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
-        throw new TelegramBotError(`Network error: ${lastError.message}`, 'network_error')
+        throw new TelegramBotError(`Network error: ${lastError.message}`, 'network_error', { cause: lastError })
       }
 
       const parsed = await this.parseJsonOrRetry<T>(response, method, attempt)
@@ -290,6 +294,9 @@ export class TelegramBotClient {
         continue
       }
       const { body } = parsed
+
+      if (response.status >= 500 && attempt === this.maxRetries)
+        throw new TelegramBotError(body.description ?? `HTTP ${response.status}`, `http_${response.status}`, { httpStatus: response.status })
 
       if (response.status === 429 || body.error_code === 429) {
         const retryAfter = body.parameters?.retry_after ?? 1
@@ -323,7 +330,7 @@ export class TelegramBotClient {
     field: 'photo' | 'document',
     chatId: ChatId,
     file: string | TelegramFileData,
-    options?: { caption?: string; parse_mode?: SendMessageOptions['parse_mode']; message_thread_id?: number },
+    options?: { caption?: string; parse_mode?: SendMessageOptions['parse_mode']; message_thread_id?: number; reply_to_message_id?: number },
   ): Promise<FormData> {
     const bytes = typeof file === 'string' ? await readFile(file) : file.data
     const filename = typeof file === 'string' ? file.split('/').pop() || 'file' : file.filename
@@ -339,6 +346,8 @@ export class TelegramBotClient {
     if (options?.parse_mode !== undefined) formData.append('parse_mode', options.parse_mode)
     if (options?.message_thread_id !== undefined)
       formData.append('message_thread_id', String(options.message_thread_id))
+    if (options?.reply_to_message_id !== undefined)
+      formData.append('reply_to_message_id', String(options.reply_to_message_id))
     return formData
   }
 
@@ -373,6 +382,7 @@ export class TelegramBotClient {
       caption?: string
       parse_mode?: SendMessageOptions['parse_mode']
       message_thread_id?: number
+      reply_to_message_id?: number
       signal?: AbortSignal
     },
   ): Promise<TelegramMessage> {
@@ -392,6 +402,7 @@ export class TelegramBotClient {
       caption?: string
       parse_mode?: SendMessageOptions['parse_mode']
       message_thread_id?: number
+      reply_to_message_id?: number
       signal?: AbortSignal
     },
   ): Promise<TelegramMessage> {
@@ -433,13 +444,18 @@ export class TelegramBotClient {
   }
 
   /** Download a file's bytes by `file_id`: one `getFile` plus one fetch of the file URL. */
-  async downloadFile(fileId: string, signal?: AbortSignal): Promise<{ buffer: Buffer; file: TelegramFile }> {
-    const file = await this.getFile(fileId, signal)
-    const response = await fetch(this.fileUrl(file), { signal })
-    if (!response.ok) {
-      throw new TelegramBotError(`Failed to download file: HTTP ${response.status}`, `http_${response.status}`)
-    }
-    return { buffer: Buffer.from(await response.arrayBuffer()), file }
+  async downloadFile(fileId: string, options: DownloadOptions = {}): Promise<{ buffer: Buffer; file: TelegramFile; contentType?: string }> {
+    return downloadRequest(options, async () => {
+      const file = await this.getFile(fileId, options.signal)
+      checkDownloadSize(file.file_size, options)
+      const response = await fetch(this.fileUrl(file), { signal: options.signal })
+      if (!response.ok) {
+        await response.body?.cancel()
+        throw new TelegramBotError(`Failed to download file: HTTP ${response.status}`, `http_${response.status}`)
+      }
+      const buffer = await readDownload(response, options)
+      return { buffer, file, contentType: response.headers.get('content-type') ?? undefined }
+    })
   }
 
   async forwardMessage(

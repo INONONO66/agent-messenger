@@ -1,8 +1,10 @@
 import { WebClient } from '@slack/web-api'
+import { z } from 'zod'
+import { checkDownloadSize, downloadRequest, type DownloadOptions, readDownload } from '../../shared/download'
 
 import { SlackBotCredentialManager } from './credential-manager'
 import { mapSlackFile, mapSlackMessage } from './message-mapper'
-import { SlackBotError, type SlackChannel, type SlackFile, type SlackMessage, type SlackUser } from './types'
+import { SlackBotError, SlackFileSchema, type SlackChannel, type SlackFile, type SlackMessage, type SlackUser } from './types'
 
 const MAX_RETRIES = 3
 const RATE_LIMIT_ERROR_CODE = 'slack_webapi_rate_limited_error'
@@ -468,30 +470,32 @@ export class SlackBotClient {
     })
   }
 
-  async downloadFile(fileId: string): Promise<{ buffer: Buffer; file: SlackFile }> {
-    const file = await this.getFileInfo(fileId)
-
-    if (!file.url_private) {
-      throw new SlackBotError('File has no download URL', 'no_download_url')
-    }
-
+  async downloadFile(fileId: string, options: DownloadOptions = {}): Promise<{ buffer: Buffer; file: SlackFile }> {
     if (!this.token) {
       throw new SlackBotError('Not authenticated. Call .login() first.', 'not_authenticated')
     }
-
-    const response = await fetch(file.url_private, {
-      headers: { Authorization: `Bearer ${this.token}` },
+    const headers = { Authorization: `Bearer ${this.token}` }
+    return downloadRequest(options, async () => {
+      // The Web API client's metadata call cannot cancel an in-flight request.
+      const metadata = await fetch(`https://slack.com/api/files.info?file=${encodeURIComponent(fileId)}`, {
+        headers, signal: options.signal,
+      })
+      if (!metadata.ok) {
+        await metadata.body?.cancel()
+        throw new SlackBotError(`Failed to download file metadata: ${metadata.status}`, 'download_failed')
+      }
+      const parsed = z.object({ ok: z.literal(true), file: SlackFileSchema }).safeParse(await metadata.json())
+      if (!parsed.success) throw new SlackBotError('Invalid file metadata response', 'invalid_response')
+      const file = parsed.data.file
+      checkDownloadSize(file.size, options)
+      if (!file.url_private) throw new SlackBotError('File has no download URL', 'no_download_url')
+      const response = await fetch(file.url_private, { headers, signal: options.signal })
+      if (!response.ok) {
+        await response.body?.cancel()
+        throw new SlackBotError(`Failed to download file: ${response.statusText}`, 'download_failed')
+      }
+      return { buffer: await readDownload(response, options), file }
     })
-
-    if (!response.ok) {
-      throw new SlackBotError(`Failed to download file: ${response.statusText}`, 'download_failed')
-    }
-
-    const arrayBuffer = await response.arrayBuffer()
-    return {
-      buffer: Buffer.from(arrayBuffer),
-      file,
-    }
   }
 
   async deleteFile(fileId: string): Promise<void> {
