@@ -1,0 +1,1 @@
+{"version":3,"file":"types.d.ts","sourceRoot":"","sources":["../../../../src/shared/chromium/types.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,aAAa;IAC5B,IAAI,EAAE,MAAM,CAAA;IACZ,MAAM,EAAE,MAAM,CAAA;IACd,KAAK,EAAE,MAAM,CAAA;IACb,KAAK,EAAE,MAAM,CAAA;CACd;AAED,MAAM,WAAW,eAAe;IAC9B,OAAO,EAAE,MAAM,CAAA;IACf,OAAO,EAAE,MAAM,CAAA;CAChB"}

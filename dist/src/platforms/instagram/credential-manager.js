@@ -1,0 +1,120 @@
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { getConfigDir } from '../../shared/utils/config-dir.js';
+import { createAccountId, } from './types.js';
+export class InstagramCredentialManager {
+    configDir;
+    credentialsPath;
+    instagramRootDir;
+    devicePath;
+    constructor(configDir) {
+        this.configDir = configDir ?? getConfigDir();
+        this.credentialsPath = join(this.configDir, 'instagram-credentials.json');
+        this.instagramRootDir = join(this.configDir, 'instagram');
+        this.devicePath = join(this.instagramRootDir, 'device.json');
+    }
+    async loadDevice() {
+        if (!existsSync(this.devicePath))
+            return null;
+        try {
+            return JSON.parse(await readFile(this.devicePath, 'utf-8'));
+        }
+        catch {
+            return null;
+        }
+    }
+    async saveDevice(device) {
+        await mkdir(this.instagramRootDir, { recursive: true });
+        await writeFile(this.devicePath, JSON.stringify(device, null, 2), { mode: 0o600 });
+    }
+    async loadConfig() {
+        if (!existsSync(this.credentialsPath)) {
+            return { current: null, accounts: {} };
+        }
+        try {
+            const content = await readFile(this.credentialsPath, 'utf-8');
+            return JSON.parse(content);
+        }
+        catch {
+            return { current: null, accounts: {} };
+        }
+    }
+    async saveConfig(config) {
+        await mkdir(this.configDir, { recursive: true });
+        await writeFile(this.credentialsPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+    }
+    async getAccount(accountId) {
+        const config = await this.loadConfig();
+        if (!accountId) {
+            return config.current ? (config.accounts[config.current] ?? null) : null;
+        }
+        const direct = config.accounts[accountId];
+        if (direct) {
+            return direct;
+        }
+        const normalized = createAccountId(accountId);
+        return config.accounts[normalized] ?? null;
+    }
+    async listAccounts() {
+        const config = await this.loadConfig();
+        return Object.values(config.accounts).map((account) => ({
+            ...account,
+            is_current: account.account_id === config.current,
+        }));
+    }
+    async setAccount(account) {
+        const config = await this.loadConfig();
+        config.accounts[account.account_id] = account;
+        if (!config.current) {
+            config.current = account.account_id;
+        }
+        await this.saveConfig(config);
+    }
+    async setCurrent(accountId) {
+        const config = await this.loadConfig();
+        const account = config.accounts[accountId] ?? config.accounts[createAccountId(accountId)];
+        if (!account) {
+            return false;
+        }
+        config.current = account.account_id;
+        await this.saveConfig(config);
+        return true;
+    }
+    async removeAccount(accountId) {
+        const config = await this.loadConfig();
+        const account = config.accounts[accountId] ?? config.accounts[createAccountId(accountId)];
+        if (!account) {
+            return false;
+        }
+        delete config.accounts[account.account_id];
+        if (config.current === account.account_id) {
+            config.current = Object.keys(config.accounts)[0] ?? null;
+        }
+        await this.saveConfig(config);
+        await rm(this.getAccountPaths(account.account_id).account_dir, { recursive: true, force: true });
+        return true;
+    }
+    async clearCredentials() {
+        if (existsSync(this.credentialsPath)) {
+            await rm(this.credentialsPath, { force: true });
+        }
+        if (existsSync(this.instagramRootDir)) {
+            await rm(this.instagramRootDir, { recursive: true, force: true });
+        }
+    }
+    getAccountPaths(accountId) {
+        const safeAccountId = createAccountId(accountId);
+        const accountDir = join(this.instagramRootDir, safeAccountId);
+        return {
+            account_dir: accountDir,
+            session_path: join(accountDir, 'session.json'),
+        };
+    }
+    async ensureAccountPaths(accountId) {
+        const paths = this.getAccountPaths(accountId);
+        await mkdir(paths.account_dir, { recursive: true });
+        return paths;
+    }
+}
+//# sourceMappingURL=credential-manager.js.map

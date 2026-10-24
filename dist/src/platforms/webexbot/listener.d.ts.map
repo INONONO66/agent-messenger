@@ -1,0 +1,1 @@
+{"version":3,"file":"listener.d.ts","sourceRoot":"","sources":["../../../../src/platforms/webexbot/listener.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,aAAa,EAAE,MAAM,mBAAmB,CAAA;AAIjD,YAAY,EACV,mBAAmB,IAAI,sBAAsB,EAC7C,oBAAoB,IAAI,uBAAuB,GAChD,MAAM,mBAAmB,CAAA;AAE1B,qBAAa,gBAAiB,SAAQ,aAAa;IAG3C,KAAK,IAAI,OAAO,CAAC,IAAI,CAAC,CAS3B;CACF"}

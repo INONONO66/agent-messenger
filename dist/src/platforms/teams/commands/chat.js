@@ -1,0 +1,201 @@
+import { Command } from 'commander';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { TeamsClient } from '../client.js';
+import { TeamsCredentialManager } from '../credential-manager.js';
+import { resolveFormat } from './format.js';
+export async function listAction(options) {
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        const chats = await client.listChats();
+        const output = chats.map((chat) => ({
+            id: chat.id,
+            type: chat.type,
+            topic: chat.topic,
+            last_message: chat.last_message,
+            last_message_at: chat.last_message_at,
+        }));
+        console.log(formatOutput(output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export async function historyAction(chatId, options) {
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        const limit = options.limit && options.limit > 0 ? options.limit : 50;
+        const page = options.page || options.cursor
+            ? await client.getChatMessagesPage(chatId, limit, options.cursor, { includeSystem: options.includeSystem })
+            : undefined;
+        const messages = page?.messages ?? (await client.getChatMessages(chatId, limit, { includeSystem: options.includeSystem }));
+        const output = messages.map((msg) => ({
+            ...msg,
+            raw: undefined,
+            id: msg.id,
+            author: msg.author.displayName,
+            content: msg.content,
+            html: msg.html,
+            files: msg.files,
+            timestamp: msg.timestamp,
+        }));
+        console.log(formatOutput(page ? { messages: output, next_cursor: page.next_cursor } : output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export async function getAction(chatId, messageId, options) {
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        const message = await client.getChatMessage(chatId, messageId);
+        const output = {
+            id: message.id,
+            author: message.author.displayName,
+            content: message.content,
+            html: message.html,
+            files: message.files,
+            timestamp: message.timestamp,
+        };
+        console.log(formatOutput(output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export async function sendAction(chatId, content, options) {
+    const format = resolveFormat(options.format, options.pretty);
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        const message = await client.sendChatMessage(chatId, content, format);
+        const output = {
+            ...message,
+            raw: undefined,
+            id: message.id,
+            content: message.content,
+            timestamp: message.timestamp,
+        };
+        console.log(formatOutput(output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export async function editAction(chatId, messageId, content, options) {
+    const format = resolveFormat(options.format, options.pretty);
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        const message = await client.editChatMessage(chatId, messageId, content, format);
+        const output = {
+            ...message,
+            raw: undefined,
+            id: message.id,
+            content: message.content,
+            timestamp: message.timestamp,
+        };
+        console.log(formatOutput(output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export const chatCommand = new Command('chat')
+    .description('Chat commands (1:1, group, and self chats)')
+    .addCommand(new Command('list')
+    .description('List 1:1, group, and self chats')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(listAction))
+    .addCommand(new Command('history')
+    .description('Get chat message history')
+    .argument('<chat-id>', 'Chat ID')
+    .option('--limit <n>', 'Number of messages to fetch', '50')
+    .option('--page', 'Return one archive page with next_cursor')
+    .option('--cursor <url>', 'Continue from a returned archive cursor')
+    .option('--include-system', 'Include membership, call and other system records')
+    .option('--pretty', 'Pretty print JSON output')
+    .action((chatId, options) => {
+    return historyAction(chatId, {
+        limit: parseInt(options.limit, 10),
+        pretty: options.pretty,
+        page: options.page,
+        cursor: options.cursor,
+        includeSystem: options.includeSystem,
+    });
+}))
+    .addCommand(new Command('get')
+    .description('Get a single chat message')
+    .argument('<chat-id>', 'Chat ID')
+    .argument('<message-id>', 'Message ID')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(getAction))
+    .addCommand(new Command('send')
+    .description('Send a message to a chat')
+    .argument('<chat-id>', 'Chat ID')
+    .argument('<content>', 'Message content')
+    .option('--format <format>', 'Message format: text, markdown, or html', 'text')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(sendAction))
+    .addCommand(new Command('edit')
+    .description('Edit a message in a chat (your own messages only)')
+    .argument('<chat-id>', 'Chat ID')
+    .argument('<message-id>', 'Message ID')
+    .argument('<content>', 'New message content')
+    .option('--format <format>', 'Message format: text, markdown, or html', 'text')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(editAction));
+//# sourceMappingURL=chat.js.map

@@ -1,0 +1,1 @@
+{"version":3,"file":"snapshot.d.ts","sourceRoot":"","sources":["../../../../../src/platforms/webex/commands/snapshot.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,OAAO,EAAE,MAAM,WAAW,CAAA;AAQnC,wBAAsB,cAAc,CAAC,OAAO,EAAE;IAAE,IAAI,CAAC,EAAE,OAAO,CAAC;IAAC,MAAM,CAAC,EAAE,OAAO,CAAA;CAAE,GAAG,OAAO,CAAC,IAAI,CAAC,CA8BjG;AAED,eAAO,MAAM,eAAe,SASxB,CAAA"}

@@ -1,0 +1,82 @@
+import { Command } from 'commander';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { TeamsClient } from '../client.js';
+import { TeamsCredentialManager } from '../credential-manager.js';
+export async function addAction(teamId, channelId, messageId, emoji, options) {
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+            return;
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        await client.addReaction(teamId, channelId, messageId, emoji, options.thread);
+        console.log(formatOutput({
+            success: true,
+            team_id: teamId,
+            channel_id: channelId,
+            message_id: messageId,
+            emoji,
+        }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export async function removeAction(teamId, channelId, messageId, emoji, options) {
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+            return;
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        await client.removeReaction(teamId, channelId, messageId, emoji, options.thread);
+        console.log(formatOutput({
+            success: true,
+            team_id: teamId,
+            channel_id: channelId,
+            message_id: messageId,
+            emoji,
+        }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export const reactionCommand = new Command('reaction')
+    .description('Reaction commands')
+    .addCommand(new Command('add')
+    .description('Add emoji reaction to message')
+    .argument('<team-id>', 'Team ID')
+    .argument('<channel-id>', 'Channel ID')
+    .argument('<message-id>', 'Message ID')
+    .argument('<emoji>', 'Unicode emoji or Teams name: like, heart, laugh, surprised, sad, angry')
+    .option('--thread <message-id>', 'Root message ID when reacting to a reply')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(addAction))
+    .addCommand(new Command('remove')
+    .description('Remove emoji reaction from message')
+    .argument('<team-id>', 'Team ID')
+    .argument('<channel-id>', 'Channel ID')
+    .argument('<message-id>', 'Message ID')
+    .argument('<emoji>', 'Unicode emoji or Teams name: like, heart, laugh, surprised, sad, angry')
+    .option('--thread <message-id>', 'Root message ID when reacting to a reply')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(removeAction));
+//# sourceMappingURL=reaction.js.map

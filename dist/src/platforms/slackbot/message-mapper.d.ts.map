@@ -1,0 +1,1 @@
+{"version":3,"file":"message-mapper.d.ts","sourceRoot":"","sources":["../../../../src/platforms/slackbot/message-mapper.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,SAAS,EAAE,YAAY,EAAE,MAAM,SAAS,CAAA;AAEtD,wBAAgB,YAAY,CAAC,CAAC,EAAE,GAAG,GAAG,SAAS,CAY9C;AAKD,wBAAgB,eAAe,CAAC,GAAG,EAAE,GAAG,GAAG,YAAY,CAoBtD"}

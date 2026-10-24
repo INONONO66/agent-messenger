@@ -1,0 +1,1 @@
+{"version":3,"file":"packet.d.ts","sourceRoot":"","sources":["../../../../../src/platforms/kakaotalk/protocol/packet.ts"],"names":[],"mappings":"AAEA,OAAO,EAAyC,KAAK,UAAU,EAAE,MAAM,SAAS,CAAA;AAEhF,wBAAgB,YAAY,CAAC,MAAM,EAAE,UAAU,GAAG,MAAM,CAcvD;AAED,wBAAgB,YAAY,CAAC,IAAI,EAAE,MAAM,GAAG;IAAE,MAAM,EAAE,UAAU,CAAC;IAAC,aAAa,EAAE,MAAM,CAAA;CAAE,GAAG,IAAI,CA0B/F"}

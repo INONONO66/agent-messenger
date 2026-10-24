@@ -1,0 +1,40 @@
+import type { TeamsClient } from './client.js';
+import type { TeamsListenerEventMap } from './types.js';
+type EventKey = keyof TeamsListenerEventMap;
+export declare class TeamsListener {
+    private client;
+    private running;
+    private ws;
+    private emitter;
+    private endpointId;
+    private idToken;
+    private info;
+    private sequence;
+    private reconnectAttempts;
+    private pingTimer;
+    private reregisterTimer;
+    private reconnectTimer;
+    private seenMessageIds;
+    private channelTeamMap;
+    private channelMapRefreshing;
+    private nonChannelThreads;
+    constructor(client: TeamsClient);
+    start(): Promise<void>;
+    stop(): void;
+    on<K extends EventKey>(event: K, listener: (...args: TeamsListenerEventMap[K]) => void): this;
+    off<K extends EventKey>(event: K, listener: (...args: TeamsListenerEventMap[K]) => void): this;
+    once<K extends EventKey>(event: K, listener: (...args: TeamsListenerEventMap[K]) => void): this;
+    private connect;
+    private handleFrame;
+    private onConnected;
+    private register;
+    private handleRequestFrame;
+    private emitMessage;
+    private classifyConversation;
+    private refreshChannelMap;
+    private rememberMessageId;
+    private scheduleReconnect;
+    private clearTimers;
+}
+export {};
+//# sourceMappingURL=listener.d.ts.map

@@ -1,0 +1,535 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { Writable } from 'node:stream';
+import { Command } from 'commander';
+import { collectBrowserProfileOption } from '../../../shared/chromium/index.js';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { isInteractive } from '../../../shared/utils/interactive.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { info, warn, error as stderrError, debug } from '../../../shared/utils/stderr.js';
+import { InstagramClient, generateDevice, parseOneClickLoginLink } from '../client.js';
+import { InstagramCredentialManager } from '../credential-manager.js';
+import { InstagramTokenExtractor } from '../token-extractor.js';
+import { createAccountId } from '../types.js';
+async function promptText(message) {
+    const { createInterface } = await import('node:readline/promises');
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    try {
+        const answer = await rl.question(`${message}: `);
+        return answer.trim() || undefined;
+    }
+    finally {
+        rl.close();
+    }
+}
+// Never trim passwords: they may contain leading/trailing spaces. Trimming corrupts them and
+// Instagram rejects the login as bad_password. Only strip the trailing CR some terminals add.
+export function sanitizePassword(raw) {
+    const password = raw.replace(/\r$/, '');
+    return password.length > 0 ? password : undefined;
+}
+async function promptHidden(message) {
+    const { createInterface } = await import('node:readline/promises');
+    const hiddenOutput = new (class extends Writable {
+        muted = false;
+        _write(chunk, encoding, cb) {
+            if (!this.muted)
+                process.stdout.write(chunk, encoding);
+            cb();
+        }
+    })();
+    const rl = createInterface({ input: process.stdin, output: hiddenOutput, terminal: true });
+    try {
+        hiddenOutput.muted = true;
+        process.stdout.write(`${message}: `);
+        const answer = await rl.question('');
+        process.stdout.write('\n');
+        return sanitizePassword(answer);
+    }
+    finally {
+        hiddenOutput.muted = false;
+        rl.close();
+    }
+}
+async function saveAccountAndPrint(manager, accountId, username, userId, pretty) {
+    const now = new Date().toISOString();
+    await manager.setAccount({
+        account_id: accountId,
+        username,
+        pk: userId,
+        created_at: now,
+        updated_at: now,
+    });
+    await manager.setCurrent(accountId);
+    console.log(formatOutput({
+        authenticated: true,
+        account_id: accountId,
+        username,
+    }, pretty));
+}
+async function loginAction(options) {
+    try {
+        const interactive = isInteractive();
+        let { username, password } = options;
+        if (!username) {
+            if (!interactive) {
+                console.log(formatOutput({
+                    error: 'Username required. Use --username <username> --password <password>.',
+                }, options.pretty));
+                process.exit(1);
+            }
+            username = await promptText('Instagram username');
+            if (!username) {
+                stderrError('Username is required.');
+                process.exit(1);
+            }
+        }
+        if (!password) {
+            if (!interactive) {
+                console.log(formatOutput({
+                    error: 'Password required. Use --username <username> --password <password>.',
+                }, options.pretty));
+                process.exit(1);
+            }
+            password = await promptHidden('Password');
+            if (!password) {
+                stderrError('Password is required.');
+                process.exit(1);
+            }
+        }
+        const manager = new InstagramCredentialManager();
+        const accountId = createAccountId(username);
+        const paths = await manager.ensureAccountPaths(accountId);
+        const client = new InstagramClient(manager);
+        client.setSessionPath(paths.session_path);
+        if (options.debug) {
+            client.setDebugLog((msg) => debug(`[debug] ${msg}`));
+        }
+        const result = await client.authenticate(username, password);
+        if (result.requiresTwoFactor) {
+            const twoFactorIdentifier = result.twoFactorInfo?.['two_factor_identifier'] ?? '';
+            if (interactive) {
+                info('\n  Two-factor authentication required.');
+                const code = await promptText('Verification code');
+                if (!code) {
+                    stderrError('Code is required.');
+                    process.exit(1);
+                }
+                const tfResult = await client.twoFactorLogin(username, code, twoFactorIdentifier);
+                await saveAccountAndPrint(manager, accountId, username, tfResult.userId, options.pretty);
+            }
+            else {
+                console.log(formatOutput({
+                    two_factor_required: true,
+                    two_factor_identifier: twoFactorIdentifier,
+                    message: 'Run "agent-instagram auth verify --username <username> --code <code> --identifier <identifier>"',
+                }, options.pretty));
+            }
+            return;
+        }
+        if (result.challengeRequired) {
+            if (interactive) {
+                await handleInteractiveChallenge(client, manager, accountId, username, result.challengePath, options.pretty);
+            }
+            else {
+                console.log(formatOutput({
+                    challenge_required: true,
+                    challenge_path: result.challengePath,
+                    message: 'Run "agent-instagram auth challenge --username <username> --method email" then "agent-instagram auth challenge --username <username> --code <code>"',
+                }, options.pretty));
+            }
+            return;
+        }
+        if (result.oneClickEmailAvailable) {
+            if (interactive) {
+                await runEmailLogin(manager, username, options, client);
+            }
+            else {
+                const { contactPoint } = await client.sendOneClickLoginEmail(username);
+                console.log(formatOutput({
+                    one_click_email_available: true,
+                    email_sent: true,
+                    contact_point: contactPoint,
+                    message: 'Password login was rejected, but this account can log in by email. A login email was sent. Open the "Login as <username>" link and run "agent-instagram auth login-email --username <username> --link <url>" to finish.',
+                }, options.pretty));
+            }
+            return;
+        }
+        await saveAccountAndPrint(manager, accountId, username, result.userId, options.pretty);
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function loginEmailAction(options) {
+    try {
+        const interactive = isInteractive();
+        const manager = new InstagramCredentialManager();
+        // Presence (not truthiness) signals redeem intent: an explicit empty --link "" must still
+        // fail closed here rather than falling through to the send-email branch and re-emailing.
+        const redeemAttempted = options.link !== undefined || options.uid !== undefined || options.token !== undefined;
+        if (redeemAttempted) {
+            if (!options.username) {
+                console.log(formatOutput({ error: '--username is required when redeeming a login email link.' }, options.pretty));
+                process.exit(1);
+            }
+            const redeem = resolveOneClickCredentials(options);
+            if (!redeem) {
+                console.log(formatOutput({ error: 'Invalid login link. Provide a valid --link <url>, or both --uid and --token.' }, options.pretty));
+                process.exit(1);
+            }
+            await redeemLoginEmail(manager, redeem.uid, redeem.token, options.username, options);
+            return;
+        }
+        let username = options.username;
+        if (!username) {
+            if (!interactive) {
+                console.log(formatOutput({
+                    error: 'Username required. Use --username <username> to send the login email, then --link <url> (or --uid and --token) to complete.',
+                }, options.pretty));
+                process.exit(1);
+            }
+            username = await promptText('Instagram username');
+            if (!username) {
+                stderrError('Username is required.');
+                process.exit(1);
+            }
+        }
+        const client = new InstagramClient(manager);
+        if (options.debug)
+            client.setDebugLog((msg) => debug(`[debug] ${msg}`));
+        if (!interactive) {
+            const { contactPoint } = await client.sendOneClickLoginEmail(username);
+            console.log(formatOutput({
+                email_sent: true,
+                contact_point: contactPoint,
+                message: 'Login email sent. Open the "Login as <username>" link and run "agent-instagram auth login-email --username <username> --link <url>" to finish.',
+            }, options.pretty));
+            return;
+        }
+        await runEmailLogin(manager, username, options, client);
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function runEmailLogin(manager, username, options, client) {
+    const { contactPoint } = await client.sendOneClickLoginEmail(username);
+    info(contactPoint ? `\n  Login email sent to: ${contactPoint}` : '\n  Login email sent.');
+    info('  Open the email, copy the "Login as ..." link, and paste it here.');
+    const link = await promptText('Login link');
+    if (!link) {
+        stderrError('Login link is required.');
+        process.exit(1);
+    }
+    const parsed = parseOneClickLoginLink(link);
+    if (!parsed) {
+        stderrError('Could not read uid and token from the pasted link.');
+        process.exit(1);
+    }
+    await redeemLoginEmail(manager, parsed.uid, parsed.token, username, options, client);
+}
+function resolveOneClickCredentials(options) {
+    if (options.link)
+        return parseOneClickLoginLink(options.link);
+    if (options.uid && options.token)
+        return { uid: options.uid, token: options.token };
+    return null;
+}
+async function redeemLoginEmail(manager, uid, token, username, options, existingClient) {
+    const client = existingClient ?? new InstagramClient(manager);
+    if (!existingClient && options.debug)
+        client.setDebugLog((msg) => debug(`[debug] ${msg}`));
+    const accountId = createAccountId(username);
+    const paths = await manager.ensureAccountPaths(accountId);
+    client.setSessionPath(paths.session_path);
+    const result = await client.oneClickLogin(uid, token);
+    await saveAccountAndPrint(manager, accountId, username, result.userId, options.pretty);
+}
+async function handleInteractiveChallenge(client, manager, accountId, username, challengePath, pretty) {
+    info('\n  Security challenge required by Instagram.');
+    info('  Choose verification method:');
+    info('  1. Email');
+    info('  2. SMS');
+    info('');
+    const choice = await promptText('Method (1/2)');
+    const method = choice === '2' ? 'sms' : 'email';
+    const sendResult = await client.challengeSendCode(challengePath, method);
+    if (sendResult.contactPoint) {
+        info(`\n  Code sent to: ${sendResult.contactPoint}`);
+    }
+    else {
+        info('\n  Verification code sent.');
+    }
+    const code = await promptText('Verification code');
+    if (!code) {
+        stderrError('Code is required.');
+        process.exit(1);
+    }
+    const verifyResult = await client.challengeSubmitCode(challengePath, code);
+    await saveAccountAndPrint(manager, accountId, username, verifyResult.userId, pretty);
+}
+async function verifyAction(options) {
+    try {
+        const manager = new InstagramCredentialManager();
+        const accountId = createAccountId(options.username);
+        const paths = await manager.ensureAccountPaths(accountId);
+        const client = new InstagramClient(manager);
+        client.setSessionPath(paths.session_path);
+        const result = await client.twoFactorLogin(options.username, options.code, options.identifier);
+        await saveAccountAndPrint(manager, accountId, options.username, result.userId, options.pretty);
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function challengeAction(options) {
+    try {
+        const manager = new InstagramCredentialManager();
+        const accountId = createAccountId(options.username);
+        const paths = await manager.ensureAccountPaths(accountId);
+        const client = new InstagramClient(manager);
+        client.setSessionPath(paths.session_path);
+        await client.loadSession(paths.session_path);
+        const challengePath = client.getChallengePath();
+        if (!challengePath) {
+            console.log(formatOutput({
+                error: 'No pending challenge found. Run "agent-instagram auth login" first.',
+            }, options.pretty));
+            process.exit(1);
+        }
+        if (options.code) {
+            const result = await client.challengeSubmitCode(challengePath, options.code);
+            await saveAccountAndPrint(manager, accountId, options.username, result.userId, options.pretty);
+        }
+        else {
+            const method = (options.method === 'sms' ? 'sms' : 'email');
+            const result = await client.challengeSendCode(challengePath, method);
+            console.log(formatOutput({
+                code_sent: true,
+                contact_point: result.contactPoint,
+                step_name: result.stepName,
+                message: `Verification code sent. Run "agent-instagram auth challenge --username ${options.username} --code <code>" to complete.`,
+            }, options.pretty));
+        }
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function statusAction(options) {
+    try {
+        const manager = new InstagramCredentialManager();
+        const account = await manager.getAccount(options.account);
+        if (!account) {
+            console.log(formatOutput({
+                error: options.account
+                    ? `Instagram account "${options.account}" not found.`
+                    : 'No Instagram account configured. Run "auth login" first.',
+            }, options.pretty));
+            process.exit(1);
+        }
+        console.log(formatOutput({
+            account_id: account.account_id,
+            username: account.username,
+            full_name: account.full_name,
+            pk: account.pk,
+            created_at: account.created_at,
+            updated_at: account.updated_at,
+        }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function listAction(options) {
+    try {
+        const manager = new InstagramCredentialManager();
+        const accounts = await manager.listAccounts();
+        console.log(formatOutput(accounts.map((account) => ({
+            account_id: account.account_id,
+            username: account.username,
+            full_name: account.full_name,
+            pk: account.pk,
+            created_at: account.created_at,
+            updated_at: account.updated_at,
+            is_current: account.is_current,
+        })), options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function useAction(accountId, options) {
+    try {
+        const manager = new InstagramCredentialManager();
+        const found = await manager.setCurrent(accountId);
+        if (!found) {
+            console.log(formatOutput({ error: `Instagram account "${accountId}" not found.` }, options.pretty));
+            process.exit(1);
+        }
+        const current = await manager.getAccount();
+        console.log(formatOutput({ success: true, account_id: current?.account_id }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function extractAction(options) {
+    try {
+        const extractor = new InstagramTokenExtractor(undefined, options.debug ? (msg) => debug(`[debug] ${msg}`) : undefined, options.browserProfile);
+        if (options.debug) {
+            debug('[debug] Searching browser profiles for Instagram cookies...');
+        }
+        const results = await extractor.extract();
+        if (results.length === 0) {
+            console.log(formatOutput({
+                error: 'No Instagram cookies found in any browser. Make sure you are logged in to instagram.com in Chrome, Edge, Arc, or Brave.',
+                hint: 'Run "auth login --username <username>" to log in manually.',
+            }, options.pretty));
+            process.exit(1);
+            return;
+        }
+        const manager = new InstagramCredentialManager();
+        let device = await manager.loadDevice();
+        if (!device) {
+            device = generateDevice();
+            await manager.saveDevice(device);
+        }
+        for (const extracted of results) {
+            const session = {
+                cookies: [
+                    `sessionid=${extracted.sessionid}`,
+                    `ds_user_id=${extracted.ds_user_id}`,
+                    `csrftoken=${extracted.csrftoken}`,
+                    extracted.mid ? `mid=${extracted.mid}` : null,
+                    extracted.ig_did ? `ig_did=${extracted.ig_did}` : null,
+                    extracted.rur ? `rur=${extracted.rur}` : null,
+                ]
+                    .filter(Boolean)
+                    .join('; '),
+                device,
+                user_id: extracted.ds_user_id,
+                mid: extracted.mid,
+            };
+            const accountId = createAccountId(extracted.ds_user_id);
+            const paths = await manager.ensureAccountPaths(accountId);
+            await mkdir(paths.account_dir, { recursive: true });
+            await writeFile(paths.session_path, JSON.stringify(session, null, 2), { mode: 0o600 });
+            const client = new InstagramClient(manager);
+            client.setSessionPath(paths.session_path);
+            if (options.debug) {
+                client.setDebugLog((msg) => debug(`[debug] ${msg}`));
+            }
+            await client.loadSession(paths.session_path);
+            let username = extracted.ds_user_id;
+            try {
+                const { data } = await client.request('GET', '/accounts/current_user/?edit=true');
+                const user = data['user'];
+                if (user?.['username']) {
+                    username = user['username'];
+                }
+                await client.saveSession();
+            }
+            catch (err) {
+                if (options.debug) {
+                    debug(`[debug] Session validation failed: ${err}`);
+                }
+                warn('Warning: Could not validate session. Cookies may be expired.');
+            }
+            const now = new Date().toISOString();
+            await manager.setAccount({
+                account_id: accountId,
+                username,
+                pk: extracted.ds_user_id,
+                created_at: now,
+                updated_at: now,
+            });
+            await manager.setCurrent(accountId);
+            console.log(formatOutput({
+                authenticated: true,
+                account_id: accountId,
+                username,
+            }, options.pretty));
+        }
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function logoutAction(options) {
+    try {
+        const manager = new InstagramCredentialManager();
+        const account = await manager.getAccount(options.account);
+        if (!account) {
+            console.log(formatOutput({
+                error: options.account
+                    ? `Instagram account "${options.account}" not found.`
+                    : 'No Instagram account configured.',
+            }, options.pretty));
+            process.exit(1);
+        }
+        await manager.removeAccount(account.account_id);
+        console.log(formatOutput({ success: true, account_id: account.account_id, logged_out: true }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export const authCommand = new Command('auth')
+    .description('Instagram authentication commands')
+    .addCommand(new Command('login')
+    .description('Log in to Instagram; prompts interactively or accepts flags for AI agents')
+    .option('--username <username>', 'Instagram username')
+    .option('--password <password>', 'Instagram password')
+    .option('--pretty', 'Pretty print JSON output')
+    .option('--debug', 'Show raw API responses')
+    .action(loginAction))
+    .addCommand(new Command('login-email')
+    .description('Log in via a one-click login email link (no password needed)')
+    .option('--username <username>', 'Instagram username (sends the login email)')
+    .option('--link <url>', 'The "Login as <username>" URL from the email')
+    .option('--uid <uid>', 'uid from the email link (alternative to --link)')
+    .option('--token <token>', 'token from the email link (alternative to --link)')
+    .option('--pretty', 'Pretty print JSON output')
+    .option('--debug', 'Show raw API responses')
+    .action(loginEmailAction))
+    .addCommand(new Command('extract')
+    .description('Extract Instagram cookies from browser (Chrome, Edge, Arc, Brave)')
+    .option('--pretty', 'Pretty print JSON output')
+    .option('--debug', 'Show debug output')
+    .option('--browser-profile <path>', 'Additional Chromium profile/user-data directory to scan (repeatable, comma-separated supported)', collectBrowserProfileOption, [])
+    .action(extractAction))
+    .addCommand(new Command('verify')
+    .description('Complete two-factor authentication (non-interactive)')
+    .requiredOption('--username <username>', 'Instagram username')
+    .requiredOption('--code <code>', 'Two-factor verification code')
+    .requiredOption('--identifier <identifier>', 'Two-factor identifier from login response')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(verifyAction))
+    .addCommand(new Command('challenge')
+    .description('Resolve a security challenge (non-interactive)')
+    .requiredOption('--username <username>', 'Instagram username')
+    .option('--method <method>', 'Verification method: email or sms', 'email')
+    .option('--code <code>', 'Verification code received via email/sms')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(challengeAction))
+    .addCommand(new Command('status')
+    .description('Show authentication status')
+    .option('--account <id>', 'Use a specific Instagram account')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(statusAction))
+    .addCommand(new Command('list')
+    .description('List stored Instagram accounts')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(listAction))
+    .addCommand(new Command('use')
+    .description('Switch the current Instagram account')
+    .argument('<account>', 'Account identifier')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(useAction))
+    .addCommand(new Command('logout')
+    .description('Remove stored credentials and session')
+    .option('--account <id>', 'Use a specific Instagram account')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(logoutAction));
+//# sourceMappingURL=auth.js.map

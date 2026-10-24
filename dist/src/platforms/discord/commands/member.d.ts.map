@@ -1,0 +1,1 @@
+{"version":3,"file":"member.d.ts","sourceRoot":"","sources":["../../../../../src/platforms/discord/commands/member.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,OAAO,EAAE,MAAM,WAAW,CAAA;AAiDnC,wBAAsB,QAAQ,CAAC,OAAO,EAAE,MAAM,GAAG,SAAS,EAAE,OAAO,EAAE;IAAE,MAAM,CAAC,EAAE,OAAO,CAAA;CAAE,GAAG,OAAO,CAAC,IAAI,CAAC,CAuDxG;AAmBD,eAAO,MAAM,aAAa,SAiBvB,CAAA"}
