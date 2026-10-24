@@ -672,10 +672,12 @@ describe('SlackBotClient', () => {
       // given
       const originalFetch = globalThis.fetch
       let capturedAuthHeader: string | null = null
-      globalThis.fetch = async (_url: any, init: any = {}) => {
-        capturedAuthHeader = init?.headers?.Authorization ?? null
+      globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+        capturedAuthHeader = new Headers(init?.headers).get('Authorization')
+        if (String(url).startsWith('https://slack.com/api/files.info'))
+          return Response.json(await mockFiles.info({ file: 'F123' }))
         return new Response(Buffer.from('downloaded content'), { status: 200 })
-      }
+      }, { preconnect: originalFetch.preconnect })
 
       try {
         const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })

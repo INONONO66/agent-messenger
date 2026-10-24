@@ -1,4 +1,6 @@
 export { SlackBotClient } from './client'
+export { DownloadError } from '../../shared/download'
+export type { DownloadOptions } from '../../shared/download'
 export { SlackBotCredentialManager } from './credential-manager'
 export { SlackBotListener } from './listener'
 export type { SlackBotListenerOptions } from './listener'

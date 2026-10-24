@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { type TransportDetails, transportCode } from '../../shared/transport-error'
 
 import type { ExpressionFormat } from './expression-format'
 import { EMOJI_FORMATS, STICKER_FORMATS, lottieError, mediaTypeOf, sniffFormat } from './expression-format'
@@ -88,13 +89,15 @@ export class DiscordError extends Error {
   httpStatus?: number
   /** Seconds the platform asked us to wait, on a `rate_limited` error. */
   retryAfter?: number
+  readonly transportCode?: string
 
-  constructor(message: string, code: string, details?: { httpStatus?: number; retryAfter?: number }) {
-    super(message)
+  constructor(message: string, code: string, details?: TransportDetails) {
+    super(message, { cause: details?.cause })
     this.name = 'DiscordError'
     this.code = code
     if (details?.httpStatus !== undefined) this.httpStatus = details.httpStatus
     if (details?.retryAfter !== undefined) this.retryAfter = details.retryAfter
+    this.transportCode = transportCode(details?.cause)
   }
 }
 

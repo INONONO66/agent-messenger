@@ -179,7 +179,7 @@ export class DiscordBotClient {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
-        throw new DiscordBotError(`Network error: ${lastError.message}`, 'network_error')
+        throw new DiscordBotError(`Network error: ${lastError.message}`, 'network_error', { cause: lastError })
       }
 
       this.updateBucket(bucketKey, response)
@@ -242,7 +242,7 @@ export class DiscordBotClient {
           await this.sleep(BASE_BACKOFF_MS * 2 ** attempt)
           continue
         }
-        throw new DiscordBotError(`Network error: ${lastError.message}`, 'network_error')
+        throw new DiscordBotError(`Network error: ${lastError.message}`, 'network_error', { cause: lastError })
       }
 
       this.updateBucket(bucketKey, response)

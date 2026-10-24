@@ -1,4 +1,6 @@
 export { TelegramBotClient } from './client'
+export { DownloadError } from '../../shared/download'
+export type { DownloadOptions } from '../../shared/download'
 export type {
   BotReactionType,
   ChatId,
