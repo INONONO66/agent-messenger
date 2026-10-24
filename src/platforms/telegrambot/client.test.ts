@@ -496,6 +496,103 @@ describe('TelegramBotClient', () => {
     })
   })
 
+  describe('audio, voice and video sends', () => {
+    const bytes = { data: new Uint8Array([4, 5, 6]), filename: 'clip.bin', contentType: 'application/octet-stream' }
+
+    const sentForm = (index: number): FormData => {
+      const body = fetchCalls[index]?.options?.body
+      if (!(body instanceof FormData)) throw new Error('Expected a multipart body')
+      return body
+    }
+
+    const expectPart = async (form: FormData, field: string): Promise<void> => {
+      const part = form.get(field)
+      if (!(part instanceof File)) throw new Error(`Missing ${field} part`)
+      expect(part.name).toBe('clip.bin')
+      expect([...new Uint8Array(await part.arrayBuffer())]).toEqual([4, 5, 6])
+    }
+
+    it('sendAudio posts the audio part with duration, performer and title', async () => {
+      mockOk({ message_id: 1, chat: { id: 1, type: 'private' }, date: 0 })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendAudio(1, bytes, { duration: 12, performer: 'P', title: 'T' })
+
+      expect(fetchCalls[0]?.url).toBe('https://api.telegram.org/botTOKEN/sendAudio')
+      const form = sentForm(0)
+      await expectPart(form, 'audio')
+      expect(form.get('duration')).toBe('12')
+      expect(form.get('performer')).toBe('P')
+      expect(form.get('title')).toBe('T')
+    })
+
+    it('sendVoice posts the voice part with duration', async () => {
+      mockOk({ message_id: 1, chat: { id: 1, type: 'private' }, date: 0 })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendVoice(1, bytes, { duration: 3, caption: 'c' })
+
+      expect(fetchCalls[0]?.url).toBe('https://api.telegram.org/botTOKEN/sendVoice')
+      const form = sentForm(0)
+      await expectPart(form, 'voice')
+      expect(form.get('duration')).toBe('3')
+      expect(form.get('caption')).toBe('c')
+    })
+
+    it('sendVideo posts the video part with duration, size and streaming flag', async () => {
+      mockOk({ message_id: 1, chat: { id: 1, type: 'private' }, date: 0 })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendVideo(1, bytes, { duration: 30, width: 640, height: 360, supports_streaming: true })
+
+      expect(fetchCalls[0]?.url).toBe('https://api.telegram.org/botTOKEN/sendVideo')
+      const form = sentForm(0)
+      await expectPart(form, 'video')
+      expect(form.get('duration')).toBe('30')
+      expect(form.get('width')).toBe('640')
+      expect(form.get('height')).toBe('360')
+      expect(form.get('supports_streaming')).toBe('true')
+    })
+
+    it('sendVideoNote posts the video_note part with duration and length', async () => {
+      mockOk({ message_id: 1, chat: { id: 1, type: 'private' }, date: 0 })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendVideoNote(1, bytes, { duration: 9, length: 240 })
+
+      expect(fetchCalls[0]?.url).toBe('https://api.telegram.org/botTOKEN/sendVideoNote')
+      const form = sentForm(0)
+      await expectPart(form, 'video_note')
+      expect(form.get('duration')).toBe('9')
+      expect(form.get('length')).toBe('240')
+    })
+
+    it('sends a file_id string as JSON under the media field', async () => {
+      mockOk({ message_id: 1, chat: { id: 1, type: 'private' }, date: 0 })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+      await client.sendVoice(1, 'FILE_ID', { duration: 4 })
+
+      const body = fetchCalls[0]?.options?.body
+      if (typeof body !== 'string') throw new Error('Expected a JSON body')
+      expect(JSON.parse(body)).toEqual({ chat_id: 1, voice: 'FILE_ID', duration: 4 })
+    })
+  })
+
+  describe('baseUrl option', () => {
+    it('routes API calls and file downloads to the configured origin', async () => {
+      mockOk({ id: 1, is_bot: true, first_name: 'X' })
+      mockOk({ file_id: 'F', file_unique_id: 'U', file_size: 3, file_path: 'voice/a.ogg' })
+      fetchResponses.push(new Response(new Uint8Array([1, 2, 3]), { status: 200 }))
+
+      const client = await new TelegramBotClient({ baseUrl: 'http://localhost:8081/' }).login({ token: 'TOKEN' })
+      await client.getMe()
+      const { buffer } = await client.downloadFile('F')
+
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'http://localhost:8081/botTOKEN/getMe',
+        'http://localhost:8081/botTOKEN/getFile',
+        'http://localhost:8081/file/botTOKEN/voice/a.ogg',
+      ])
+      expect([...buffer]).toEqual([1, 2, 3])
+    })
+  })
+
   describe('sendChatAction / answerCallbackQuery / getFile', () => {
     it('sendChatAction posts the action', async () => {
       mockOk(true)
