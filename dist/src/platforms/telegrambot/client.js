@@ -7,12 +7,14 @@ const BASE_BACKOFF_MS = 100;
 export class TelegramBotClient {
     token = null;
     maxRetries;
+    baseUrl;
     constructor(options) {
         const retries = options?.retries ?? DEFAULT_MAX_RETRIES;
         if (!Number.isInteger(retries) || retries < 0) {
             throw new TelegramBotError('retries must be a non-negative integer', 'invalid_retries');
         }
         this.maxRetries = retries;
+        this.baseUrl = (options?.baseUrl ?? BASE_URL).replace(/\/+$/, '');
     }
     async login(credentials) {
         if (credentials) {
@@ -37,7 +39,7 @@ export class TelegramBotClient {
         return this.token;
     }
     buildUrl(method) {
-        return `${BASE_URL}/bot${this.ensureAuth()}/${method}`;
+        return `${this.baseUrl}/bot${this.ensureAuth()}/${method}`;
     }
     sleep(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,7 +88,9 @@ export class TelegramBotClient {
     }
     refuseExhaustedServerError(response, description, attempt) {
         if (response.status >= 500 && attempt === this.maxRetries)
-            throw new TelegramBotError(description ?? `HTTP ${response.status}`, `http_${response.status}`, { httpStatus: response.status });
+            throw new TelegramBotError(description ?? `HTTP ${response.status}`, `http_${response.status}`, {
+                httpStatus: response.status,
+            });
     }
     async requestJson(method, request, signal) {
         const url = this.buildUrl(method);
@@ -196,8 +200,8 @@ export class TelegramBotClient {
         }
         throw lastError ?? new TelegramBotError('Request failed after retries', 'max_retries');
     }
-    /** One multipart body for `sendPhoto`/`sendDocument`: the media part plus the plain fields. */
-    async mediaForm(field, chatId, file, options) {
+    /** One multipart body for every media send: the media part plus the plain fields. */
+    async mediaForm(field, chatId, file, fields) {
         const bytes = typeof file === 'string' ? await readFile(file) : file.data;
         const filename = typeof file === 'string' ? file.split('/').pop() || 'file' : file.filename;
         const blob = typeof file !== 'string' && file.contentType !== undefined
@@ -206,15 +210,19 @@ export class TelegramBotClient {
         const formData = new FormData();
         formData.append('chat_id', String(chatId));
         formData.append(field, blob, filename);
-        if (options?.caption !== undefined)
-            formData.append('caption', options.caption);
-        if (options?.parse_mode !== undefined)
-            formData.append('parse_mode', options.parse_mode);
-        if (options?.message_thread_id !== undefined)
-            formData.append('message_thread_id', String(options.message_thread_id));
-        if (options?.reply_to_message_id !== undefined)
-            formData.append('reply_to_message_id', String(options.reply_to_message_id));
+        for (const [name, value] of Object.entries(fields)) {
+            if (value !== undefined)
+                formData.append(name, String(value));
+        }
         return formData;
+    }
+    /** A string is an https URL or a `file_id` and goes as JSON; bytes go as multipart. */
+    async sendMedia(method, field, chatId, media, fields, signal) {
+        if (typeof media === 'string') {
+            return this.call(method, { chat_id: chatId, [field]: media, ...fields }, signal);
+        }
+        const formData = await this.mediaForm(field, chatId, media, fields);
+        return this.callMultipart(method, formData, signal);
     }
     async getMe() {
         return this.call('getMe');
@@ -237,11 +245,27 @@ export class TelegramBotClient {
      */
     async sendPhoto(chatId, photo, options) {
         const { signal, ...fields } = options ?? {};
-        if (typeof photo === 'string') {
-            return this.call('sendPhoto', { chat_id: chatId, photo, ...fields }, signal);
-        }
-        const formData = await this.mediaForm('photo', chatId, photo, fields);
-        return this.callMultipart('sendPhoto', formData, signal);
+        return this.sendMedia('sendPhoto', 'photo', chatId, photo, fields, signal);
+    }
+    /** Send music shown in the player; same string-or-bytes input as `sendPhoto`. */
+    async sendAudio(chatId, audio, options) {
+        const { signal, ...fields } = options ?? {};
+        return this.sendMedia('sendAudio', 'audio', chatId, audio, fields, signal);
+    }
+    /** Send a voice message; Telegram plays it as voice only when it is OGG/Opus, MP3 or M4A. */
+    async sendVoice(chatId, voice, options) {
+        const { signal, ...fields } = options ?? {};
+        return this.sendMedia('sendVoice', 'voice', chatId, voice, fields, signal);
+    }
+    /** Send an MPEG4 video; same string-or-bytes input as `sendPhoto`. */
+    async sendVideo(chatId, video, options) {
+        const { signal, ...fields } = options ?? {};
+        return this.sendMedia('sendVideo', 'video', chatId, video, fields, signal);
+    }
+    /** Send a round video note: square MPEG4, at most one minute. */
+    async sendVideoNote(chatId, videoNote, options) {
+        const { signal, ...fields } = options ?? {};
+        return this.sendMedia('sendVideoNote', 'video_note', chatId, videoNote, fields, signal);
     }
     /** Send a document: a path on disk, or `{ data, filename }` bytes. Always multipart. */
     async sendDocument(chatId, file, options) {
@@ -268,7 +292,7 @@ export class TelegramBotClient {
         if (file.file_path === undefined) {
             throw new TelegramBotError('File has no download path (too large, or getFile not called)', 'no_download_path');
         }
-        return `${BASE_URL}/file/bot${this.ensureAuth()}/${file.file_path}`;
+        return `${this.baseUrl}/file/bot${this.ensureAuth()}/${file.file_path}`;
     }
     /** Download a file's bytes by `file_id`: one `getFile` plus one fetch of the file URL. */
     async downloadFile(fileId, options = {}) {

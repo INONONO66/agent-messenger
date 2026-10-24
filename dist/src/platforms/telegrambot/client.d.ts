@@ -7,6 +7,11 @@ export interface TelegramBotClientOptions {
      * attempt, for callers that own idempotency themselves. Defaults to 3.
      */
     retries?: number;
+    /**
+     * Bot API origin, `https://api.telegram.org` by default. A self-hosted
+     * Bot API server lifts the 50 MB upload and 20 MB `getFile` caps.
+     */
+    baseUrl?: string;
 }
 /** Bytes already in memory, for callers that never touch the local disk. */
 export interface TelegramFileData {
@@ -53,9 +58,39 @@ export type BotReactionType = {
     emoji: string;
 };
 export type ChatId = number | string;
+export type SendMediaOptions = {
+    caption?: string;
+    parse_mode?: SendMessageOptions['parse_mode'];
+    message_thread_id?: number;
+    reply_to_message_id?: number;
+    signal?: AbortSignal;
+};
+export type SendAudioOptions = SendMediaOptions & {
+    duration?: number;
+    performer?: string;
+    title?: string;
+};
+export type SendVoiceOptions = SendMediaOptions & {
+    duration?: number;
+};
+export type SendVideoOptions = SendMediaOptions & {
+    duration?: number;
+    width?: number;
+    height?: number;
+    supports_streaming?: boolean;
+};
+/** Video notes carry no caption; `length` is the side of the square video. */
+export type SendVideoNoteOptions = {
+    duration?: number;
+    length?: number;
+    message_thread_id?: number;
+    reply_to_message_id?: number;
+    signal?: AbortSignal;
+};
 export declare class TelegramBotClient {
     private token;
     private readonly maxRetries;
+    private readonly baseUrl;
     constructor(options?: TelegramBotClientOptions);
     login(credentials?: {
         token: string;
@@ -70,8 +105,10 @@ export declare class TelegramBotClient {
     private refuseExhaustedServerError;
     private requestJson;
     private callMultipart;
-    /** One multipart body for `sendPhoto`/`sendDocument`: the media part plus the plain fields. */
+    /** One multipart body for every media send: the media part plus the plain fields. */
     private mediaForm;
+    /** A string is an https URL or a `file_id` and goes as JSON; bytes go as multipart. */
+    private sendMedia;
     getMe(): Promise<TelegramBotUser>;
     getChat(chatId: ChatId): Promise<TelegramChatFullInfo>;
     getChatMember(chatId: ChatId, userId: number): Promise<TelegramChatMember>;
@@ -81,21 +118,17 @@ export declare class TelegramBotClient {
      * Send a photo. `photo` is an https URL or a Telegram `file_id` (sent as
      * JSON), or `{ data, filename }` bytes (sent as multipart).
      */
-    sendPhoto(chatId: ChatId, photo: string | TelegramFileData, options?: {
-        caption?: string;
-        parse_mode?: SendMessageOptions['parse_mode'];
-        message_thread_id?: number;
-        reply_to_message_id?: number;
-        signal?: AbortSignal;
-    }): Promise<TelegramMessage>;
+    sendPhoto(chatId: ChatId, photo: string | TelegramFileData, options?: SendMediaOptions): Promise<TelegramMessage>;
+    /** Send music shown in the player; same string-or-bytes input as `sendPhoto`. */
+    sendAudio(chatId: ChatId, audio: string | TelegramFileData, options?: SendAudioOptions): Promise<TelegramMessage>;
+    /** Send a voice message; Telegram plays it as voice only when it is OGG/Opus, MP3 or M4A. */
+    sendVoice(chatId: ChatId, voice: string | TelegramFileData, options?: SendVoiceOptions): Promise<TelegramMessage>;
+    /** Send an MPEG4 video; same string-or-bytes input as `sendPhoto`. */
+    sendVideo(chatId: ChatId, video: string | TelegramFileData, options?: SendVideoOptions): Promise<TelegramMessage>;
+    /** Send a round video note: square MPEG4, at most one minute. */
+    sendVideoNote(chatId: ChatId, videoNote: string | TelegramFileData, options?: SendVideoNoteOptions): Promise<TelegramMessage>;
     /** Send a document: a path on disk, or `{ data, filename }` bytes. Always multipart. */
-    sendDocument(chatId: ChatId, file: string | TelegramFileData, options?: {
-        caption?: string;
-        parse_mode?: SendMessageOptions['parse_mode'];
-        message_thread_id?: number;
-        reply_to_message_id?: number;
-        signal?: AbortSignal;
-    }): Promise<TelegramMessage>;
+    sendDocument(chatId: ChatId, file: string | TelegramFileData, options?: SendMediaOptions): Promise<TelegramMessage>;
     /** Show a chat action ("typing…") for about five seconds or until the next message. */
     sendChatAction(chatId: ChatId, action: TelegramChatAction, options?: {
         message_thread_id?: number;

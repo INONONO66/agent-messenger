@@ -85,6 +85,56 @@ export interface TelegramDocument {
     mime_type?: string;
     file_size?: number;
 }
+export interface TelegramAudio {
+    file_id: string;
+    file_unique_id: string;
+    duration: number;
+    performer?: string;
+    title?: string;
+    file_name?: string;
+    mime_type?: string;
+    file_size?: number;
+    thumbnail?: TelegramPhotoSize;
+}
+export interface TelegramVoice {
+    file_id: string;
+    file_unique_id: string;
+    duration: number;
+    mime_type?: string;
+    file_size?: number;
+}
+export interface TelegramVideo {
+    file_id: string;
+    file_unique_id: string;
+    width: number;
+    height: number;
+    duration: number;
+    thumbnail?: TelegramPhotoSize;
+    file_name?: string;
+    mime_type?: string;
+    file_size?: number;
+}
+export interface TelegramVideoNote {
+    file_id: string;
+    file_unique_id: string;
+    /** Side of the square video. */
+    length: number;
+    duration: number;
+    thumbnail?: TelegramPhotoSize;
+    file_size?: number;
+}
+/** A GIF or soundless H.264/MPEG-4 clip; Telegram also sets `document` on these messages. */
+export interface TelegramAnimation {
+    file_id: string;
+    file_unique_id: string;
+    width: number;
+    height: number;
+    duration: number;
+    thumbnail?: TelegramPhotoSize;
+    file_name?: string;
+    mime_type?: string;
+    file_size?: number;
+}
 export interface TelegramMessage {
     message_id: number;
     message_thread_id?: number;
@@ -100,6 +150,11 @@ export interface TelegramMessage {
     edit_date?: number;
     photo?: TelegramPhotoSize[];
     document?: TelegramDocument;
+    audio?: TelegramAudio;
+    voice?: TelegramVoice;
+    video?: TelegramVideo;
+    video_note?: TelegramVideoNote;
+    animation?: TelegramAnimation;
     is_topic_message?: boolean;
 }
 export interface TelegramReactionType {
@@ -225,6 +280,78 @@ export declare const TelegramPhotoSizeSchema: z.ZodObject<{
 export declare const TelegramDocumentSchema: z.ZodObject<{
     file_id: z.ZodString;
     file_unique_id: z.ZodString;
+    thumbnail: z.ZodOptional<z.ZodObject<{
+        file_id: z.ZodString;
+        file_unique_id: z.ZodString;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+        file_size: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+    file_name: z.ZodOptional<z.ZodString>;
+    mime_type: z.ZodOptional<z.ZodString>;
+    file_size: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const TelegramAudioSchema: z.ZodObject<{
+    file_id: z.ZodString;
+    file_unique_id: z.ZodString;
+    duration: z.ZodNumber;
+    performer: z.ZodOptional<z.ZodString>;
+    title: z.ZodOptional<z.ZodString>;
+    file_name: z.ZodOptional<z.ZodString>;
+    mime_type: z.ZodOptional<z.ZodString>;
+    file_size: z.ZodOptional<z.ZodNumber>;
+    thumbnail: z.ZodOptional<z.ZodObject<{
+        file_id: z.ZodString;
+        file_unique_id: z.ZodString;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+        file_size: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const TelegramVoiceSchema: z.ZodObject<{
+    file_id: z.ZodString;
+    file_unique_id: z.ZodString;
+    duration: z.ZodNumber;
+    mime_type: z.ZodOptional<z.ZodString>;
+    file_size: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const TelegramVideoSchema: z.ZodObject<{
+    file_id: z.ZodString;
+    file_unique_id: z.ZodString;
+    width: z.ZodNumber;
+    height: z.ZodNumber;
+    duration: z.ZodNumber;
+    thumbnail: z.ZodOptional<z.ZodObject<{
+        file_id: z.ZodString;
+        file_unique_id: z.ZodString;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+        file_size: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+    file_name: z.ZodOptional<z.ZodString>;
+    mime_type: z.ZodOptional<z.ZodString>;
+    file_size: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const TelegramVideoNoteSchema: z.ZodObject<{
+    file_id: z.ZodString;
+    file_unique_id: z.ZodString;
+    length: z.ZodNumber;
+    duration: z.ZodNumber;
+    thumbnail: z.ZodOptional<z.ZodObject<{
+        file_id: z.ZodString;
+        file_unique_id: z.ZodString;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+        file_size: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+    file_size: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const TelegramAnimationSchema: z.ZodObject<{
+    file_id: z.ZodString;
+    file_unique_id: z.ZodString;
+    width: z.ZodNumber;
+    height: z.ZodNumber;
+    duration: z.ZodNumber;
     thumbnail: z.ZodOptional<z.ZodObject<{
         file_id: z.ZodString;
         file_unique_id: z.ZodString;

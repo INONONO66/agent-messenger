@@ -85,6 +85,44 @@ export const TelegramDocumentSchema = z.object({
     mime_type: z.string().optional(),
     file_size: z.number().optional(),
 });
+export const TelegramAudioSchema = z.object({
+    file_id: z.string(),
+    file_unique_id: z.string(),
+    duration: z.number(),
+    performer: z.string().optional(),
+    title: z.string().optional(),
+    file_name: z.string().optional(),
+    mime_type: z.string().optional(),
+    file_size: z.number().optional(),
+    thumbnail: TelegramPhotoSizeSchema.optional(),
+});
+export const TelegramVoiceSchema = z.object({
+    file_id: z.string(),
+    file_unique_id: z.string(),
+    duration: z.number(),
+    mime_type: z.string().optional(),
+    file_size: z.number().optional(),
+});
+export const TelegramVideoSchema = z.object({
+    file_id: z.string(),
+    file_unique_id: z.string(),
+    width: z.number(),
+    height: z.number(),
+    duration: z.number(),
+    thumbnail: TelegramPhotoSizeSchema.optional(),
+    file_name: z.string().optional(),
+    mime_type: z.string().optional(),
+    file_size: z.number().optional(),
+});
+export const TelegramVideoNoteSchema = z.object({
+    file_id: z.string(),
+    file_unique_id: z.string(),
+    length: z.number(),
+    duration: z.number(),
+    thumbnail: TelegramPhotoSizeSchema.optional(),
+    file_size: z.number().optional(),
+});
+export const TelegramAnimationSchema = TelegramVideoSchema;
 export const TelegramMessageSchema = z
     .object({
     message_id: z.number(),
@@ -101,6 +139,11 @@ export const TelegramMessageSchema = z
     edit_date: z.number().optional(),
     photo: z.array(TelegramPhotoSizeSchema).optional(),
     document: TelegramDocumentSchema.optional(),
+    audio: TelegramAudioSchema.optional(),
+    voice: TelegramVoiceSchema.optional(),
+    video: TelegramVideoSchema.optional(),
+    video_note: TelegramVideoNoteSchema.optional(),
+    animation: TelegramAnimationSchema.optional(),
     is_topic_message: z.boolean().optional(),
 })
     .passthrough();

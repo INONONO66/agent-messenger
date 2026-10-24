@@ -1,8 +1,8 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { getConfigDir } from '../../shared/utils/config-dir.js';
-import { FileStorage } from '@/vendor/linejs/base/storage/mod.js';
-import { loginWithQR as linejsLoginWithQR, loginWithPassword as linejsLoginWithPassword, loginWithAuthToken as linejsLoginWithAuthToken, } from '@/vendor/linejs/client/mod.js';
+import { FileStorage } from '../../vendor/linejs/base/storage/mod.js';
+import { loginWithQR as linejsLoginWithQR, loginWithPassword as linejsLoginWithPassword, loginWithAuthToken as linejsLoginWithAuthToken, } from '../../vendor/linejs/client/mod.js';
 import { LineCredentialManager } from './credential-manager.js';
 import { ensureSelfKeyForMid, migrateOwnE2EEKeys } from './e2ee-storage.js';
 import { LineError } from './types.js';
