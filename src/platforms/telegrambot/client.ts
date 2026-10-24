@@ -192,6 +192,11 @@ export class TelegramBotClient {
     return this.requestJson<T>(method, { method: 'POST', body: params }, signal)
   }
 
+  private refuseExhaustedServerError(response: Response, description: string | undefined, attempt: number): void {
+    if (response.status >= 500 && attempt === this.maxRetries)
+      throw new TelegramBotError(description ?? `HTTP ${response.status}`, `http_${response.status}`, { httpStatus: response.status })
+  }
+
   private async requestJson<T>(
     method: string,
     request: { method: 'POST' | 'GET'; body?: Record<string, unknown> },
@@ -234,8 +239,7 @@ export class TelegramBotClient {
       }
       const { body } = parsed
 
-      if (response.status >= 500 && attempt === this.maxRetries)
-        throw new TelegramBotError(body.description ?? `HTTP ${response.status}`, `http_${response.status}`, { httpStatus: response.status })
+      this.refuseExhaustedServerError(response, body.description, attempt)
 
       if (response.status === 429 || body.error_code === 429) {
         const retryAfter = body.parameters?.retry_after ?? 1
@@ -295,8 +299,7 @@ export class TelegramBotClient {
       }
       const { body } = parsed
 
-      if (response.status >= 500 && attempt === this.maxRetries)
-        throw new TelegramBotError(body.description ?? `HTTP ${response.status}`, `http_${response.status}`, { httpStatus: response.status })
+      this.refuseExhaustedServerError(response, body.description, attempt)
 
       if (response.status === 429 || body.error_code === 429) {
         const retryAfter = body.parameters?.retry_after ?? 1
