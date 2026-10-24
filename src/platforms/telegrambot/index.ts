@@ -8,7 +8,12 @@ export type {
   EditMessageTextInline,
   EditMessageTextTarget,
   GetUpdatesOptions,
+  SendAudioOptions,
+  SendMediaOptions,
   SendMessageOptions,
+  SendVideoNoteOptions,
+  SendVideoOptions,
+  SendVoiceOptions,
   TelegramBotClientOptions,
   TelegramChatAction,
   TelegramFile,
@@ -17,6 +22,8 @@ export type {
 export { TelegramBotCredentialManager } from './credential-manager'
 export { TelegramBotListener } from './listener'
 export type {
+  TelegramAnimation,
+  TelegramAudio,
   TelegramBotConfig,
   TelegramBotCredentials,
   TelegramBotEntry,
@@ -35,8 +42,13 @@ export type {
   TelegramPhotoSize,
   TelegramReactionType,
   TelegramUpdate,
+  TelegramVideo,
+  TelegramVideoNote,
+  TelegramVoice,
 } from './types'
 export {
+  TelegramAnimationSchema,
+  TelegramAudioSchema,
   TelegramBotConfigSchema,
   TelegramBotCredentialsSchema,
   TelegramBotEntrySchema,
@@ -47,4 +59,7 @@ export {
   TelegramMessageEntitySchema,
   TelegramMessageSchema,
   TelegramPhotoSizeSchema,
+  TelegramVideoNoteSchema,
+  TelegramVideoSchema,
+  TelegramVoiceSchema,
 } from './types'

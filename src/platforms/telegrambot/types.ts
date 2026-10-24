@@ -1,4 +1,5 @@
 import { z } from 'zod'
+
 import { type TransportDetails, transportCode } from '../../shared/transport-error'
 
 export interface TelegramBotEntry {
@@ -103,6 +104,61 @@ export interface TelegramDocument {
   file_size?: number
 }
 
+export interface TelegramAudio {
+  file_id: string
+  file_unique_id: string
+  duration: number
+  performer?: string
+  title?: string
+  file_name?: string
+  mime_type?: string
+  file_size?: number
+  thumbnail?: TelegramPhotoSize
+}
+
+export interface TelegramVoice {
+  file_id: string
+  file_unique_id: string
+  duration: number
+  mime_type?: string
+  file_size?: number
+}
+
+export interface TelegramVideo {
+  file_id: string
+  file_unique_id: string
+  width: number
+  height: number
+  duration: number
+  thumbnail?: TelegramPhotoSize
+  file_name?: string
+  mime_type?: string
+  file_size?: number
+}
+
+export interface TelegramVideoNote {
+  file_id: string
+  file_unique_id: string
+  /** Side of the square video. */
+  length: number
+  duration: number
+  thumbnail?: TelegramPhotoSize
+  file_size?: number
+}
+
+/** A GIF or soundless H.264/MPEG-4 clip; Telegram also sets `document` on these messages. */
+export interface TelegramAnimation {
+  file_id: string
+  file_unique_id: string
+  width: number
+  height: number
+  duration: number
+  thumbnail?: TelegramPhotoSize
+  file_name?: string
+  mime_type?: string
+  file_size?: number
+}
+
 export interface TelegramMessage {
   message_id: number
   message_thread_id?: number
@@ -118,6 +174,11 @@ export interface TelegramMessage {
   edit_date?: number
   photo?: TelegramPhotoSize[]
   document?: TelegramDocument
+  audio?: TelegramAudio
+  voice?: TelegramVoice
+  video?: TelegramVideo
+  video_note?: TelegramVideoNote
+  animation?: TelegramAnimation
   is_topic_message?: boolean
 }
 
@@ -248,6 +309,49 @@ export const TelegramDocumentSchema = z.object({
   file_size: z.number().optional(),
 })
 
+export const TelegramAudioSchema = z.object({
+  file_id: z.string(),
+  file_unique_id: z.string(),
+  duration: z.number(),
+  performer: z.string().optional(),
+  title: z.string().optional(),
+  file_name: z.string().optional(),
+  mime_type: z.string().optional(),
+  file_size: z.number().optional(),
+  thumbnail: TelegramPhotoSizeSchema.optional(),
+})
+
+export const TelegramVoiceSchema = z.object({
+  file_id: z.string(),
+  file_unique_id: z.string(),
+  duration: z.number(),
+  mime_type: z.string().optional(),
+  file_size: z.number().optional(),
+})
+
+export const TelegramVideoSchema = z.object({
+  file_id: z.string(),
+  file_unique_id: z.string(),
+  width: z.number(),
+  height: z.number(),
+  duration: z.number(),
+  thumbnail: TelegramPhotoSizeSchema.optional(),
+  file_name: z.string().optional(),
+  mime_type: z.string().optional(),
+  file_size: z.number().optional(),
+})
+
+export const TelegramVideoNoteSchema = z.object({
+  file_id: z.string(),
+  file_unique_id: z.string(),
+  length: z.number(),
+  duration: z.number(),
+  thumbnail: TelegramPhotoSizeSchema.optional(),
+  file_size: z.number().optional(),
+})
+
+export const TelegramAnimationSchema = TelegramVideoSchema
+
 export const TelegramMessageSchema = z
   .object({
     message_id: z.number(),
@@ -264,6 +368,11 @@ export const TelegramMessageSchema = z
     edit_date: z.number().optional(),
     photo: z.array(TelegramPhotoSizeSchema).optional(),
     document: TelegramDocumentSchema.optional(),
+    audio: TelegramAudioSchema.optional(),
+    voice: TelegramVoiceSchema.optional(),
+    video: TelegramVideoSchema.optional(),
+    video_note: TelegramVideoNoteSchema.optional(),
+    animation: TelegramAnimationSchema.optional(),
     is_topic_message: z.boolean().optional(),
   })
   .passthrough() as z.ZodType<TelegramMessage>
