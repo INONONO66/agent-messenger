@@ -4,7 +4,7 @@ import WebSocket from 'ws'
 
 import type { DiscordBotClient } from './client'
 import type { DiscordBotListenerEventMap, DiscordGatewayGenericEvent } from './types'
-import { DiscordGatewayOpcode, DiscordIntent } from './types'
+import { DiscordGatewayOpcode, DiscordIntent, DiscordVoiceServerUpdateSchema, DiscordVoiceStateUpdateSchema } from './types'
 
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json'
 const GATEWAY_QUERY = '?v=10&encoding=json'
@@ -56,6 +56,8 @@ export class DiscordBotListener {
   private generation = 0
   private startPromise: Promise<void> | null = null
   private pendingStartReject: ((error: Error) => void) | null = null
+  private voiceTeardowns = new Set<() => void>()
+  private readySocket: WebSocket | null = null
 
   constructor(client: DiscordBotClient, options?: DiscordBotListenerOptions) {
     this.client = client
@@ -129,6 +131,7 @@ export class DiscordBotListener {
   }
 
   stop(): void {
+    this.destroyVoice()
     this.running = false
     this.generation++
     this.clearTimers()
@@ -148,6 +151,7 @@ export class DiscordBotListener {
     this.resumeGatewayUrl = null
     this.token = null
     this.cachedUser = null
+    this.readySocket = null
     rejectStart?.(new Error('Discord gateway start was stopped before becoming ready'))
   }
 
@@ -169,6 +173,35 @@ export class DiscordBotListener {
   once<K extends EventKey>(event: K, listener: (...args: DiscordBotListenerEventMap[K]) => void): this {
     this.emitter.once(event, listener as (...args: any[]) => void)
     return this
+  }
+
+  listenerCount(event: EventKey): number {
+    return this.emitter.listenerCount(event)
+  }
+
+  botUserId(): string | undefined {
+    return this.readySocket === this.ws && this.ws?.readyState === WebSocket.OPEN
+      ? this.cachedUser?.id
+      : undefined
+  }
+
+  sendVoiceState(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): boolean {
+    if (!this.botUserId()) return false
+    this.ws?.send(JSON.stringify({
+      op: DiscordGatewayOpcode.VoiceStateUpdate,
+      d: { guild_id: guildId, channel_id: channelId, self_mute: selfMute, self_deaf: selfDeaf },
+    }))
+    return true
+  }
+
+  registerVoiceTeardown(destroy: () => void): () => void {
+    this.voiceTeardowns.add(destroy)
+    return () => { this.voiceTeardowns.delete(destroy) }
+  }
+
+  private destroyVoice(): void {
+    for (const destroy of this.voiceTeardowns) destroy()
+    this.voiceTeardowns.clear()
   }
 
   private isCurrent(generation: number, ws?: WebSocket): boolean {
@@ -209,6 +242,8 @@ export class DiscordBotListener {
 
       ws.on('close', (code) => {
         if (!this.isCurrent(generation, ws)) return
+        this.destroyVoice()
+        this.readySocket = null
         this.clearTimers()
         this.ws = null
         if (NON_RECOVERABLE_CLOSE_CODES.includes(code)) {
@@ -260,7 +295,7 @@ export class DiscordBotListener {
 
       case DiscordGatewayOpcode.Dispatch:
         if (typeof s === 'number') this.sequence = s
-        if (t) this.handleDispatch(t, d)
+        if (t) this.handleDispatch(t, d, typeof s === 'number' ? s : null, ws)
         break
 
       case DiscordGatewayOpcode.Reconnect:
@@ -290,17 +325,19 @@ export class DiscordBotListener {
     }
   }
 
-  private handleDispatch(t: string, d: any): void {
+  private handleDispatch(t: string, d: any, sequence: number | null, ws: WebSocket): void {
     if (t === 'READY') {
       this.sessionId = d.session_id
       this.resumeGatewayUrl = d.resume_gateway_url
       this.cachedUser = d.user
+      this.readySocket = ws
       this.reconnectAttempts = 0
       this.emitter.emit('connected', { user: d.user, sessionId: d.session_id })
       return
     }
 
     if (t === 'RESUMED') {
+      this.readySocket = ws
       this.reconnectAttempts = 0
       this.emitter.emit('connected', { user: this.cachedUser!, sessionId: this.sessionId! })
       return
@@ -308,7 +345,15 @@ export class DiscordBotListener {
 
     const eventType = t.toLowerCase()
     const event: DiscordGatewayGenericEvent = { ...d, type: t }
-    this.emitter.emit(eventType, event)
+    if (t === 'VOICE_STATE_UPDATE') {
+      const parsed = DiscordVoiceStateUpdateSchema.safeParse(d)
+      if (parsed.success) this.emitter.emit('voice_state_update', parsed.data, sequence)
+    } else if (t === 'VOICE_SERVER_UPDATE') {
+      const parsed = DiscordVoiceServerUpdateSchema.safeParse(d)
+      if (parsed.success) this.emitter.emit('voice_server_update', parsed.data)
+    } else {
+      this.emitter.emit(eventType, event)
+    }
     this.emitter.emit('discord_event', event)
   }
 

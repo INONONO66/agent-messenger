@@ -244,6 +244,28 @@ export const DiscordGatewayOpcode = {
   HeartbeatACK: 11,
 } as const
 
+export const DiscordVoiceStateUpdateSchema = z.object({
+  guild_id: z.string().optional(),
+  channel_id: z.string().nullable(),
+  user_id: z.string(),
+  session_id: z.string(),
+  deaf: z.boolean(),
+  mute: z.boolean(),
+  self_deaf: z.boolean(),
+  self_mute: z.boolean(),
+  self_video: z.boolean(),
+  suppress: z.boolean(),
+  self_stream: z.boolean().optional(),
+})
+export type DiscordVoiceStateUpdate = z.infer<typeof DiscordVoiceStateUpdateSchema>
+
+export const DiscordVoiceServerUpdateSchema = z.object({
+  token: z.string(),
+  guild_id: z.string(),
+  endpoint: z.string().nullable(),
+})
+export type DiscordVoiceServerUpdate = z.infer<typeof DiscordVoiceServerUpdateSchema>
+
 export const DiscordIntent = {
   Guilds: 1 << 0,
   GuildMembers: 1 << 1, // privileged
@@ -393,6 +415,8 @@ export type DiscordGatewayEvent =
   | DiscordGatewayGenericEvent
 
 export interface DiscordBotListenerEventMap {
+  voice_state_update: [state: DiscordVoiceStateUpdate, sequence: number | null]
+  voice_server_update: [server: DiscordVoiceServerUpdate]
   message_create: [event: DiscordGatewayMessageCreateEvent]
   message_update: [event: DiscordGatewayMessageUpdateEvent]
   message_delete: [event: DiscordGatewayMessageDeleteEvent]
