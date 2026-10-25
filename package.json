@@ -84,6 +84,9 @@
       ],
       "telegrambot": [
         "./dist/src/platforms/telegrambot/index.d.ts"
+      ],
+      "telegram": [
+        "./dist/src/platforms/telegram/index.d.ts"
       ]
     }
   },
@@ -160,6 +163,10 @@
     "./telegrambot": {
       "types": "./dist/src/platforms/telegrambot/index.d.ts",
       "default": "./dist/src/platforms/telegrambot/index.js"
+    },
+    "./telegram": {
+      "types": "./dist/src/platforms/telegram/index.d.ts",
+      "default": "./dist/src/platforms/telegram/index.js"
     }
   },
   "scripts": {
@@ -221,7 +228,7 @@
     "typescript": "^7.0.2"
   },
   "optionalDependencies": {
-    "koffi": "^2.15.2",
+    "koffi": "2.15.2",
     "prebuilt-tdlib": "0.1008062.2"
   },
   "engines": {

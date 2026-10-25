@@ -19,9 +19,24 @@ const mockPaths: TelegramAccountPaths = {
 
 function createMockClient(sendHandler: (request: any, events: any[]) => void) {
   const events: any[] = []
+  let deliver: ((event: any) => void) | undefined
   const createClientId = mock(() => 1)
-  const send = mock((_clientId: number, request: any) => sendHandler(request, events))
-  const receive = mock(() => events.shift() ?? null)
+  const send = mock((_clientId: number, request: any) => {
+    sendHandler(request, events)
+    if (deliver && events.length) {
+      const next = deliver
+      deliver = undefined
+      next({ ...events.shift(), '@client_id': 1 })
+    }
+  })
+  const receive = mock(() => {
+    const event = events.shift()
+    return event
+      ? { ...event, '@client_id': 1 }
+      : new Promise((resolve) => {
+          deliver = resolve
+        })
+  })
 
   const client = new (TelegramTdlibClient as unknown as new (
     account: TelegramAccount,
@@ -168,6 +183,7 @@ describe('sendMessage confirmation', () => {
     const tempId = 100
     const serverId = 999
     const events: any[] = []
+    let deliver: ((event: any) => void) | undefined
 
     const createClientId = mock(() => 1)
     const send = mock((_clientId: number, request: any) => {
@@ -216,9 +232,21 @@ describe('sendMessage confirmation', () => {
           },
         })
       }
+      if (deliver && events.length) {
+        const next = deliver
+        deliver = undefined
+        next({ ...events.shift(), '@client_id': 1 })
+      }
     })
 
-    const receive = mock(() => events.shift() ?? null)
+    const receive = mock(() => {
+      const event = events.shift()
+      return event
+        ? { ...event, '@client_id': 1 }
+        : new Promise((resolve) => {
+            deliver = resolve
+          })
+    })
     const client = new (TelegramTdlibClient as unknown as new (
       account: TelegramAccount,
       paths: TelegramAccountPaths,
@@ -239,6 +267,7 @@ describe('sendMessage confirmation', () => {
 describe('editMessage', () => {
   it('returns the edited message from the editMessageText response', async () => {
     const events: any[] = []
+    let deliver: ((event: any) => void) | undefined
     let editRequest: any = null
 
     const createClientId = mock(() => 1)
@@ -271,9 +300,21 @@ describe('editMessage', () => {
           '@extra': request['@extra'],
         })
       }
+      if (deliver && events.length) {
+        const next = deliver
+        deliver = undefined
+        next({ ...events.shift(), '@client_id': 1 })
+      }
     })
 
-    const receive = mock(() => events.shift() ?? null)
+    const receive = mock(() => {
+      const event = events.shift()
+      return event
+        ? { ...event, '@client_id': 1 }
+        : new Promise((resolve) => {
+            deliver = resolve
+          })
+    })
     const client = new (TelegramTdlibClient as unknown as new (
       account: TelegramAccount,
       paths: TelegramAccountPaths,
