@@ -816,6 +816,28 @@ describe('history, sends and downloads', () => {
     expect(sequence).toBe(5)
   })
 
+  it('preserves a document filename while containing hostile names within staging', async () => {
+    const { client, fake, input } = await started()
+    const paths: string[] = []
+    fake.onSend = (id, request) => {
+      if (request['@type'] !== 'sendMessage') return
+      paths.push(request.input_message_content.document.path)
+      const temp = paths.length
+      fake.reply(id, request, { '@type': 'message', id: temp })
+      fake.emit(id, {
+        '@type': 'updateMessageSendSucceeded',
+        old_message_id: temp,
+        message: { id: temp + 100, chat_id: 33 },
+      })
+    }
+    for (const name of ['report.pdf', '../../escape.pdf']) {
+      await client.send('33', { kind: 'file', bytes: new Uint8Array([1]), name, mime: 'application/pdf' })
+    }
+    expect(paths.map((path) => path.split('/').at(-1))).toEqual(['report.pdf', 'escape.pdf'])
+    expect(paths.every((path) => path.startsWith(`${input.filesDir}/outbound-`))).toBe(true)
+    expect(await readdir(input.filesDir)).toEqual([])
+  })
+
   it('removes byte staging on explicit refusal and ambiguous confirmation', async () => {
     const { client, fake, input } = await started()
     fake.onSend = (id, request) => {
@@ -972,12 +994,32 @@ describe('history, sends and downloads', () => {
     }
     await expect(client.send('33', { kind: 'file', path: '/fake/file' })).rejects.toMatchObject({
       code: 'media_too_large',
+      requestRefused: true,
+    })
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'sendMessage')
+        fake.reply(id, request, { '@type': 'error', message: 'AUTH_KEY_UNREGISTERED', code: 401 })
+    }
+    await expect(client.send('33', { kind: 'text', text: 'payload' })).rejects.toMatchObject({
+      code: 'session_lost',
+      requestRefused: true,
     })
     fake.onSend = (id, request) => {
       if (request['@type'] === 'sendMessage')
         fake.reply(id, request, { '@type': 'error', message: 'CHAT_WRITE_FORBIDDEN', code: 403 })
     }
-    await expect(client.send('33', { kind: 'text', text: 'payload' })).rejects.toMatchObject({ code: 'not_sent' })
+    await expect(client.send('33', { kind: 'text', text: 'payload' })).rejects.toMatchObject({
+      code: 'not_sent',
+      requestRefused: true,
+    })
+  })
+
+  it('does not mark post-dispatch session loss as a refused request', async () => {
+    const { client, fake, timer } = await awaitingConfirmation(99)
+    const sending = client.send('33', { kind: 'text', text: 'payload' })
+    await timer.ready
+    fake.failReceive(new Error('connection lost'))
+    await expect(sending).rejects.toMatchObject({ code: 'unknown', requestRefused: false })
   })
 
   it('maps every outbound media kind to its TDLib input content', async () => {
@@ -1045,29 +1087,31 @@ describe('history, sends and downloads', () => {
     })
   })
 
-  it('cancels an asynchronous download when aborted', async () => {
-    const { client, fake } = await started()
-    const controller = new AbortController()
-    let dispatched: (() => void) | undefined
-    const sent = new Promise<void>((resolve) => {
-      dispatched = resolve
-    })
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'downloadFile') {
-        fake.reply(id, request, {
-          '@type': 'file',
-          id: 9,
-          size: 100,
-          local: { path: '', is_downloading_completed: false },
-        })
+  it('cancels an asynchronous download before or after its first reply', async () => {
+    for (const replyFirst of [true, false]) {
+      const { client, fake } = await started()
+      const controller = new AbortController()
+      let dispatched: (() => void) | undefined
+      const sent = new Promise<void>((resolve) => {
+        dispatched = resolve
+      })
+      fake.onSend = (id, request) => {
+        if (request['@type'] !== 'downloadFile') return
+        if (replyFirst)
+          fake.reply(id, request, {
+            '@type': 'file',
+            id: 9,
+            size: 100,
+            local: { path: '', is_downloading_completed: false },
+          })
         dispatched?.()
       }
+      const pending = client.download(9, { signal: controller.signal })
+      await sent
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ code: 'download_failed' })
+      expect(fake.sent.map(({ request }) => request['@type'])).toContain('cancelDownloadFile')
     }
-    const pending = client.download(9, { signal: controller.signal })
-    await sent
-    controller.abort()
-    await expect(pending).rejects.toMatchObject({ code: 'download_failed' })
-    expect(fake.sent.map(({ request }) => request['@type'])).toContain('cancelDownloadFile')
   })
 
   it('streams a sparse file larger than 50 MiB in bounded chunks', async () => {
