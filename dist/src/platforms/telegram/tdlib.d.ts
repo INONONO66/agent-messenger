@@ -5,7 +5,7 @@ export declare class TdjsonBinding {
     static create(tdlibPath?: string): Promise<TdjsonBinding>;
     createClientId(): number;
     send(clientId: number, query: unknown): void;
-    receive(timeoutSeconds: number): any | null;
+    receive(timeoutSeconds: number): Promise<unknown>;
     execute(query: unknown): any | null;
 }
 //# sourceMappingURL=tdlib.d.ts.map

@@ -1,0 +1,1 @@
+{"version":3,"file":"account-message.d.ts","sourceRoot":"","sources":["../../../../src/platforms/telegram/account-message.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,sBAAsB,EAAE,MAAM,iBAAiB,CAAA;AA4C7D,wBAAgB,mBAAmB,CACjC,GAAG,EAAE,OAAO,EACZ,QAAQ,CAAC,EAAE,MAAM,EACjB,iBAAiB,GAAE,WAAW,CAAC,MAAM,EAAE,MAAM,CAAa,GACzD,sBAAsB,GAAG,SAAS,CAyGpC"}

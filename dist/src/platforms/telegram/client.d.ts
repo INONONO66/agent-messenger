@@ -13,9 +13,12 @@ export declare class TelegramTdlibClient {
     private paths;
     private tdjson;
     private clientId;
+    private receiver;
+    private readonly listeners;
+    private unsubscribe;
     private currentAuthorizationState;
-    private requestSeq;
     private pendingMessages;
+    private readonly confirmedMessages;
     private constructor();
     static create(account: TelegramAccount, paths: TelegramAccountPaths): Promise<TelegramTdlibClient>;
     connect(): Promise<TdAuthorizationState>;
@@ -41,7 +44,7 @@ export declare class TelegramTdlibClient {
     private waitForAuthorizationStateChange;
     private waitForAuthorizationState;
     private call;
-    private drainUpdates;
+    private awaitEvent;
     private waitForMessageConfirmation;
 }
 export {};

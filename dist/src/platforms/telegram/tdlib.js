@@ -3,6 +3,7 @@ function unwrapDefaultExport(moduleNamespace) {
     return moduleNamespace.default ?? moduleNamespace;
 }
 let cachedKoffi;
+let sharedBinding;
 async function getKoffi() {
     if (cachedKoffi) {
         return cachedKoffi;
@@ -89,8 +90,14 @@ export class TdjsonBinding {
         this.execute({ '@type': 'setLogVerbosityLevel', new_verbosity_level: 0 });
     }
     static async create(tdlibPath) {
-        const loaded = await loadTdjson(tdlibPath);
-        return new TdjsonBinding(loaded.libraryPath, loaded.symbols);
+        sharedBinding ??= loadTdjson(tdlibPath).then((loaded) => new TdjsonBinding(loaded.libraryPath, loaded.symbols));
+        try {
+            return await sharedBinding;
+        }
+        catch (error) {
+            sharedBinding = undefined;
+            throw error;
+        }
     }
     createClientId() {
         return this.symbols.td_create_client_id();
@@ -98,12 +105,30 @@ export class TdjsonBinding {
     send(clientId, query) {
         this.symbols.td_send(clientId, JSON.stringify(query));
     }
-    receive(timeoutSeconds) {
-        const result = this.symbols.td_receive(timeoutSeconds);
+    async receive(timeoutSeconds) {
+        const result = await new Promise((resolve, reject) => {
+            this.symbols.td_receive.async(timeoutSeconds, (error, value) => {
+                if (error)
+                    reject(error);
+                else
+                    resolve(value);
+            });
+        });
         if (!result || !result.trim()) {
             return null;
         }
-        return JSON.parse(result);
+        return JSON.parse(result, function (key, value) {
+            const context = arguments[2];
+            if (typeof value === 'number' &&
+                !Number.isSafeInteger(value) &&
+                /^(id|chat_id|message_id|old_message_id|user_id)$/.test(key) &&
+                typeof context === 'object' &&
+                context !== null &&
+                'source' in context &&
+                typeof context.source === 'string')
+                return context.source;
+            return value;
+        });
     }
     execute(query) {
         const result = this.symbols.td_execute(JSON.stringify(query));
