@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 
 import pkg from '../../../package.json' with { type: 'json' }
 import { findFuzzyChats, mergeChats, normalizeChatSearchText } from './chat-utils'
+import { TdReceiver, type TdEvent } from './receiver'
 import { TdjsonBinding } from './tdlib'
 import {
   parseChatReference,
@@ -43,8 +44,10 @@ interface RequestOptions {
 export class TelegramTdlibClient {
   private tdjson: TdjsonBinding
   private clientId: number
+  private receiver: TdReceiver
+  private readonly listeners = new Set<(event: TdEvent) => void>()
+  private unsubscribe: () => void
   private currentAuthorizationState: TdAuthorizationState | null = null
-  private requestSeq = 0
   private pendingMessages = new Map<
     number,
     {
@@ -52,6 +55,7 @@ export class TelegramTdlibClient {
       reject: (err: TelegramError) => void
     }
   >()
+  private readonly confirmedMessages = new Map<number, TdMessage | TelegramError>()
 
   private constructor(
     private account: TelegramAccount,
@@ -60,6 +64,11 @@ export class TelegramTdlibClient {
   ) {
     this.tdjson = tdjson
     this.clientId = this.tdjson.createClientId()
+    this.receiver = TdReceiver.for(tdjson)
+    this.unsubscribe = this.receiver.on(this.clientId, (event) => {
+      this.handleEvent(event)
+      for (const listener of this.listeners) listener(event)
+    })
   }
 
   static async create(account: TelegramAccount, paths: TelegramAccountPaths): Promise<TelegramTdlibClient> {
@@ -142,6 +151,7 @@ export class TelegramTdlibClient {
 
   async close(options: { waitForClosed?: boolean; timeoutMs?: number } = {}): Promise<void> {
     if (this.currentAuthorizationState?.['@type'] === 'authorizationStateClosed') {
+      this.unsubscribe()
       return
     }
 
@@ -156,10 +166,12 @@ export class TelegramTdlibClient {
 
     if (waitForClosed) {
       await this.waitForAuthorizationState('authorizationStateClosed', timeoutMs).catch(() => undefined)
+      this.unsubscribe()
       return
     }
 
     await this.waitForAuthorizationState('authorizationStateClosed', timeoutMs).catch(() => undefined)
+    this.unsubscribe()
   }
 
   async listChats(limit: number = 20): Promise<TelegramChatSummary[]> {
@@ -271,8 +283,6 @@ export class TelegramTdlibClient {
         if (messages.length >= limit || (attempt > 0 && messages.length === previousCount)) {
           break
         }
-
-        await this.drainUpdates(1000)
       }
 
       return messages.slice(0, limit).map((message: TdMessage) => simplifyMessage(message, chat.id))
@@ -510,6 +520,8 @@ export class TelegramTdlibClient {
       if (pending) {
         this.pendingMessages.delete(update.old_message_id)
         pending.resolve(update.message)
+      } else {
+        this.confirmedMessages.set(update.old_message_id, update.message)
       }
       return update.message
     }
@@ -520,6 +532,11 @@ export class TelegramTdlibClient {
       if (pending) {
         this.pendingMessages.delete(update.old_message_id)
         pending.reject(
+          new TelegramError(update.error_message ?? 'Message send failed', update.error_code ?? 'send_failed'),
+        )
+      } else {
+        this.confirmedMessages.set(
+          update.old_message_id,
           new TelegramError(update.error_message ?? 'Message send failed', update.error_code ?? 'send_failed'),
         )
       }
@@ -538,29 +555,13 @@ export class TelegramTdlibClient {
       return this.currentAuthorizationState
     }
 
-    const deadline = Date.now() + timeoutMs
-
-    while (Date.now() < deadline) {
-      const event = this.tdjson.receive(Math.min(0.5, Math.max((deadline - Date.now()) / 1000, 0.05)))
-      if (!event) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
-        continue
-      }
-
-      if (event['@type'] === 'updateAuthorizationState') {
-        this.currentAuthorizationState = event.authorization_state
-        if (previousType === undefined || event.authorization_state['@type'] !== previousType) {
-          return event.authorization_state
-        }
-        continue
-      }
-
-      this.handleEvent(event)
-    }
-
-    throw new TelegramError(
-      `Timed out waiting for authorization state change from ${previousType ?? 'unknown state'}.`,
-      'timeout',
+    return this.awaitEvent(
+      (event) =>
+        event['@type'] === 'updateAuthorizationState' &&
+        (previousType === undefined || (event.authorization_state as TdAuthorizationState)['@type'] !== previousType)
+          ? event.authorization_state
+          : undefined,
+      timeoutMs,
     )
   }
 
@@ -569,77 +570,47 @@ export class TelegramTdlibClient {
       return this.currentAuthorizationState
     }
 
-    const deadline = Date.now() + timeoutMs
-
-    while (Date.now() < deadline) {
-      const event = this.tdjson.receive(Math.min(0.5, Math.max((deadline - Date.now()) / 1000, 0.05)))
-      if (!event) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
-        continue
-      }
-
-      if (event['@type'] === 'updateAuthorizationState') {
-        this.currentAuthorizationState = event.authorization_state
-        if (event.authorization_state['@type'] === targetType) {
-          return event.authorization_state
-        }
-        continue
-      }
-
-      this.handleEvent(event)
-    }
-
-    return this.currentAuthorizationState
+    return this.awaitEvent(
+      (event) =>
+        event['@type'] === 'updateAuthorizationState' &&
+        (event.authorization_state as TdAuthorizationState)['@type'] === targetType
+          ? event.authorization_state
+          : undefined,
+      timeoutMs,
+    )
   }
 
   private async call(query: Record<string, unknown>, options: RequestOptions = {}): Promise<any> {
-    const timeoutMs = options.timeoutMs ?? 15000
-    this.requestSeq += 1
-    const extra = `req-${Date.now()}-${this.requestSeq}`
-
-    this.tdjson.send(this.clientId, {
-      ...query,
-      '@extra': extra,
-    })
-
-    const deadline = Date.now() + timeoutMs
-
-    while (Date.now() < deadline) {
-      const event = this.tdjson.receive(Math.min(0.5, Math.max((deadline - Date.now()) / 1000, 0.05)))
-      if (!event) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
-        continue
-      }
-
-      if (event['@extra'] === extra) {
-        if (event['@type'] === 'error') {
-          throw new TelegramError(event.message ?? 'TDLib error', event.code ?? 'tdlib_error')
-        }
-
-        return this.handleEvent(event)
-      }
-
-      this.handleEvent(event)
+    const event = await this.receiver.request(this.clientId, query, options.timeoutMs)
+    if (event['@type'] === 'error') {
+      throw new TelegramError(String(event.message ?? 'TDLib error'), Number(event.code ?? 0))
     }
-
-    throw new TelegramError(`Timed out waiting for TDLib response to ${query['@type']}`, 'timeout')
+    return this.handleEvent(event)
   }
 
-  private async drainUpdates(durationMs: number): Promise<void> {
-    const deadline = Date.now() + durationMs
-
-    while (Date.now() < deadline) {
-      const event = this.tdjson.receive(Math.min(0.25, Math.max((deadline - Date.now()) / 1000, 0.01)))
-      if (!event) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
-        continue
+  private awaitEvent<T>(pick: (event: TdEvent) => T | undefined, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.listeners.delete(listener)
+        reject(new TelegramError('Timed out waiting for TDLib update', 'timeout'))
+      }, timeoutMs)
+      const listener = (event: TdEvent) => {
+        const value = pick(event)
+        if (value === undefined) return
+        clearTimeout(timer)
+        this.listeners.delete(listener)
+        resolve(value)
       }
-
-      this.handleEvent(event)
-    }
+      this.listeners.add(listener)
+    })
   }
 
   private async waitForMessageConfirmation(tempMessageId: number, timeoutMs: number): Promise<TdMessage | null> {
+    const confirmed = this.confirmedMessages.get(tempMessageId)
+    if (confirmed) {
+      this.confirmedMessages.delete(tempMessageId)
+      return confirmed instanceof TelegramError ? null : confirmed
+    }
     return new Promise<TdMessage | null>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingMessages.delete(tempMessageId)
@@ -656,23 +627,6 @@ export class TelegramTdlibClient {
           resolve(null)
         },
       })
-
-      void (async () => {
-        const deadline = Date.now() + timeoutMs
-        while (Date.now() < deadline && this.pendingMessages.has(tempMessageId)) {
-          const event = this.tdjson.receive(0.1)
-          if (!event) {
-            await new Promise((loopResolve) => setTimeout(loopResolve, 0))
-            continue
-          }
-
-          try {
-            this.handleEvent(event)
-          } catch {
-            // Swallow errors from unrelated events during message confirmation polling
-          }
-        }
-      })()
     })
   }
 }
