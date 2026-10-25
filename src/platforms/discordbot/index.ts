@@ -2,6 +2,8 @@ export { DiscordBotClient } from './client'
 export type { DiscordBotClientOptions } from './client'
 export { DiscordBotCredentialManager } from './credential-manager'
 export { DiscordBotListener } from './listener'
+export { joinVoice, DiscordVoiceError } from './voice'
+export type { DiscordVoiceHandle, DiscordVoiceErrorCode } from './voice'
 export type { DiscordBotListenerOptions } from './listener'
 export type {
   DiscordAttachmentInput,
@@ -10,6 +12,8 @@ export type {
   DiscordBotEntry,
   DiscordCreateMessageOptions,
   DiscordBotListenerEventMap,
+  DiscordVoiceStateUpdate,
+  DiscordVoiceServerUpdate,
   DiscordChannel,
   DiscordFile,
   DiscordFileData,
