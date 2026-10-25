@@ -1,7 +1,7 @@
 import { type Readable, type Transform } from 'node:stream';
 import type { DiscordGatewayAdapterCreator, VoiceConnection, AudioPlayer, AudioResource } from '@discordjs/voice';
 import type { DiscordBotListener } from './listener.js';
-export type DiscordVoiceErrorCode = 'voice_not_ready' | 'voice_busy' | 'voice_aborted' | 'voice_join_failed';
+export type DiscordVoiceErrorCode = 'voice_not_ready' | 'voice_busy' | 'voice_aborted' | 'voice_join_failed' | 'voice_overflow';
 export declare class DiscordVoiceError extends Error {
     readonly code: DiscordVoiceErrorCode;
     constructor(code: DiscordVoiceErrorCode, cause?: Error);
