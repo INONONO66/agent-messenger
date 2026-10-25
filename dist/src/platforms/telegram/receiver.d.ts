@@ -5,6 +5,8 @@ declare const EventSchema: z.ZodObject<{
     '@extra': z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export type TdEvent = z.infer<typeof EventSchema>;
+/** A TDLib JSON request as the binding accepts it; each reply is checked by its caller's schema. */
+export type TdQuery = Parameters<TdBinding['send']>[1];
 export interface TdBinding {
     createClientId(): number;
     send(clientId: number, query: Record<string, unknown>): void;
@@ -24,7 +26,7 @@ export declare class TdReceiver {
     static for(binding: TdBinding): TdReceiver;
     private constructor();
     on(clientId: number, handler: (event: TdEvent) => void): () => void;
-    request(clientId: number, query: Record<string, unknown>, timeoutMs?: number): Promise<TdEvent>;
+    request(clientId: number, query: TdQuery, timeoutMs?: number, signal?: AbortSignal): Promise<TdEvent>;
     private start;
     private wanted;
     private dispatch;

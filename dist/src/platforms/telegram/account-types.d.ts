@@ -108,7 +108,8 @@ export interface TelegramAccountClient {
 export type TelegramAccountErrorCode = 'tdlib_not_found' | 'session_in_use' | 'session_lost' | 'login_action_required' | 'media_too_large' | 'download_failed' | 'history_unavailable' | 'not_sent' | 'unknown';
 export declare class TelegramAccountError extends Error {
     readonly code: TelegramAccountErrorCode;
+    readonly requestRefused: boolean;
     readonly name = "TelegramAccountError";
-    constructor(message: string, code: TelegramAccountErrorCode);
+    constructor(message: string, code: TelegramAccountErrorCode, requestRefused?: boolean);
 }
 //# sourceMappingURL=account-types.d.ts.map

@@ -46,9 +46,11 @@ export class TdReceiver {
                 this.clients.delete(clientId);
         };
     }
-    request(clientId, query, timeoutMs = 15000) {
+    request(clientId, query, timeoutMs = 15000, signal) {
         if (this.failure)
             return Promise.reject(this.failure);
+        if (signal?.aborted)
+            return Promise.reject(new Error('TDLib request aborted'));
         const extra = `td-${++this.sequence}`;
         let requests = this.pending.get(clientId);
         if (!requests) {
@@ -56,27 +58,38 @@ export class TdReceiver {
             this.pending.set(clientId, requests);
         }
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
+            const cleanup = () => {
+                clearTimeout(timer);
+                signal?.removeEventListener('abort', abort);
                 requests.delete(extra);
+            };
+            const abort = () => {
+                cleanup();
+                reject(new Error('TDLib request aborted'));
+            };
+            const timer = setTimeout(() => {
+                cleanup();
                 reject(new Error(`Timed out waiting for TDLib response to ${query['@type']}`));
             }, timeoutMs);
             requests.set(extra, {
                 resolve: (event) => {
-                    clearTimeout(timer);
+                    cleanup();
                     resolve(event);
                 },
                 reject: (error) => {
-                    clearTimeout(timer);
+                    cleanup();
                     reject(error);
                 },
             });
+            signal?.addEventListener('abort', abort, { once: true });
+            if (signal?.aborted)
+                return abort();
             this.start();
             try {
                 this.binding.send(clientId, { ...query, '@extra': extra });
             }
             catch (error) {
-                clearTimeout(timer);
-                requests.delete(extra);
+                cleanup();
                 reject(new TdDispatchError(error instanceof Error ? error : new Error(String(error))));
             }
         });

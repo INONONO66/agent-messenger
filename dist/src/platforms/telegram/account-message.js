@@ -16,7 +16,7 @@ const Formatted = z
         .default([]),
 })
     .passthrough();
-const Message = z
+export const AccountMessageSchema = z
     .object({
     '@type': z.literal('message'),
     id: z.union([z.number(), z.string()]),
@@ -205,12 +205,10 @@ function replyOf(message) {
     const bot = shared ? botMessageId(reply.message_id) : undefined;
     return { replyToMessageId: String(reply.message_id), ...(bot && { botReplyToMessageId: bot }) };
 }
-export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map(), userIsBot) {
-    const result = Message.safeParse(raw);
-    const typed = Content.safeParse(result.data?.content);
-    if (!result.success || !typed.success)
+export function parseAccountMessage(message, chatType, resolvedUsernames = new Map(), userIsBot) {
+    const typed = Content.safeParse(message.content);
+    if (!typed.success)
         return undefined;
-    const message = result.data;
     const type = message.content['@type'];
     const formatted = type === 'messageText' ? typed.data.text : typed.data.caption;
     if (type === 'messageText' && !formatted)

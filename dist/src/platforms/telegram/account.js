@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { botMessageId, parseAccountMessage, sendTopic } from './account-message.js';
+import { AccountMessageSchema, botMessageId, parseAccountMessage, sendTopic } from './account-message.js';
 import { TelegramAccountError, } from './account-types.js';
 import { TdDispatchError, TdReceiver } from './receiver.js';
 import { TdjsonBinding } from './tdlib.js';
@@ -18,7 +18,7 @@ const File = z.object({
         is_downloading_active: z.boolean().optional(),
     }),
 });
-function failure(event, fallback) {
+function failure(event, fallback, requestRefused = false) {
     const message = String(event.error_message ?? event.message ?? 'TDLib request failed');
     const code = /database.*(lock|use)|lock.*database|another instance/i.test(message)
         ? 'session_in_use'
@@ -27,7 +27,7 @@ function failure(event, fallback) {
             : /file.*(too[\s_]*(big|large)|size.*limit)/i.test(message)
                 ? 'media_too_large'
                 : fallback;
-    return new TelegramAccountError(message, code);
+    return new TelegramAccountError(message, code, requestRefused);
 }
 function loginAction(state) {
     switch (state) {
@@ -53,8 +53,25 @@ const NATIVE_CLOSING = new Set([
     'authorizationStateLoggingOut',
 ]);
 const SenderUser = z.object({ sender_id: z.object({ '@type': z.literal('messageSenderUser'), user_id: Id }) });
+const InputFile = z.object({ '@type': z.literal('inputFileLocal'), path: z.string() });
+const Caption = z.object({ '@type': z.literal('formattedText'), text: z.string(), entities: z.array(z.never()) });
+const InputMessageContent = z.discriminatedUnion('@type', [
+    z.object({ '@type': z.literal('inputMessageText'), text: Caption }),
+    z.object({ '@type': z.literal('inputMessagePhoto'), photo: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageAudio'), audio: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageVoiceNote'), voice_note: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageVideo'), video: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageDocument'), document: InputFile, caption: Caption }),
+]);
 function sendKey(chatId, messageId) {
     return `${chatId}:${messageId}`;
+}
+function stagedFilename(name) {
+    const segment = name
+        .split(/[\\/]/)
+        .at(-1)
+        ?.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return segment && segment !== '.' && segment !== '..' ? segment : 'upload';
 }
 function inputContent(content, stagedPath) {
     const caption = {
@@ -62,12 +79,10 @@ function inputContent(content, stagedPath) {
         text: content.kind === 'text' ? content.text : (content.caption ?? ''),
         entities: [],
     };
-    const file = content.kind === 'text'
-        ? undefined
-        : { '@type': 'inputFileLocal', path: stagedPath ?? ('path' in content ? content.path : '') };
+    if (content.kind === 'text')
+        return { '@type': 'inputMessageText', text: caption };
+    const file = { '@type': 'inputFileLocal', path: stagedPath ?? ('path' in content ? content.path : '') };
     switch (content.kind) {
-        case 'text':
-            return { '@type': 'inputMessageText', text: caption };
         case 'image':
             return { '@type': 'inputMessagePhoto', photo: file, caption };
         case 'audio':
@@ -202,9 +217,9 @@ class AccountClient {
             this.chats.set(String(chat.data.id), chat.data.type['@type']);
     }
     onNewMessage(event) {
-        const chatId = z.object({ chat_id: Id }).safeParse(event.message);
-        if (chatId.success)
-            void this.publishMessage(event.message, String(chatId.data.chat_id)).catch(() => this.end('session_lost'));
+        const message = AccountMessageSchema.safeParse(event.message);
+        if (message.success)
+            void this.publishMessage(message.data, String(message.data.chat_id)).catch(() => this.end('session_lost'));
     }
     // Temporary message ids are unique only within their chat, so confirmations correlate by chat and id.
     onSendOutcome(event) {
@@ -340,13 +355,13 @@ class AccountClient {
         }
         return undefined;
     }
-    async call(query, code) {
+    async call(query, code, signal) {
         if (!this.receiver || this.clientId === undefined)
             throw new TelegramAccountError('Client is not started', 'session_lost');
         try {
-            const event = await this.receiver.request(this.clientId, query);
+            const event = await this.receiver.request(this.clientId, query, 15000, signal);
             if (event['@type'] === 'error')
-                throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code);
+                throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code, query['@type'] === 'sendMessage');
             return event;
         }
         catch (error) {
@@ -498,10 +513,12 @@ class AccountClient {
             limit: options.limit,
             only_local: false,
         }, 'history_unavailable');
-        const page = z.object({ messages: z.array(z.unknown()) }).parse(result);
+        const page = z.object({ messages: z.array(AccountMessageSchema) }).safeParse(result);
+        if (!page.success)
+            throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable');
         const chatType = await this.chatType(chatId);
         const messages = [];
-        for (const raw of page.messages) {
+        for (const raw of page.data.messages) {
             const parsed = await this.parseMessage(raw, chatType);
             if (!parsed)
                 throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable');
@@ -525,6 +542,7 @@ class AccountClient {
                 parsed.data.id === fileId &&
                 (parsed.data.local.is_downloading_completed || parsed.data.local.is_downloading_active === false));
         });
+        const completion = completed.promise.then((event) => ({ event }), (error) => ({ error }));
         const abort = () => {
             if (this.binding && this.clientId !== undefined)
                 this.binding.send(this.clientId, { '@type': 'cancelDownloadFile', file_id: fileId, only_if_pending: false });
@@ -532,9 +550,12 @@ class AccountClient {
         };
         options.signal.addEventListener('abort', abort, { once: true });
         try {
-            const reply = await this.call({ '@type': 'downloadFile', file_id: fileId, priority: 1, offset: 0, limit: 0, synchronous: false }, 'download_failed');
+            const reply = await this.call({ '@type': 'downloadFile', file_id: fileId, priority: 1, offset: 0, limit: 0, synchronous: false }, 'download_failed', options.signal);
             const first = File.parse(reply);
-            const file = first.local.is_downloading_completed ? first : File.parse((await completed.promise).file);
+            const outcome = first.local.is_downloading_completed ? undefined : await completion;
+            if (outcome && 'error' in outcome)
+                throw outcome.error;
+            const file = outcome ? File.parse(outcome.event.file) : first;
             completed.cancel();
             if (!file.local.is_downloading_completed)
                 throw new TelegramAccountError('TDLib download stopped before completion', 'download_failed');
@@ -595,9 +616,10 @@ class AccountClient {
         try {
             if (bytes)
                 stage = await mkdtemp(join(this.filesDir ?? '', 'outbound-'));
-            if (stage && bytes)
-                await writeFile(join(stage, 'upload'), bytes, { flag: 'wx', mode: 0o600 });
-            return await this.sendPrepared(chatId, content, topic_id, stage ? join(stage, 'upload') : undefined);
+            const stagedPath = stage && 'name' in content ? join(stage, stagedFilename(content.name)) : undefined;
+            if (stagedPath && bytes)
+                await writeFile(stagedPath, bytes, { flag: 'wx', mode: 0o600 });
+            return await this.sendPrepared(chatId, content, topic_id, stagedPath);
         }
         catch (error) {
             if (error instanceof TelegramAccountError)
