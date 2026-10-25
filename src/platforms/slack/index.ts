@@ -1,6 +1,8 @@
 export { SlackClient, SlackError } from './client'
 export { SlackCredentialManager, CredentialManager } from './credential-manager'
 export { SlackListener } from './listener'
+export { joinHuddle, SlackHuddleError } from './huddle'
+export type { SlackSessionCredentials, SlackHuddleEvent, SlackHuddleHandle, SlackHuddleErrorCode } from './huddle'
 export { loginWithQr } from './qr-http-login'
 export type { QrLoginOptions, QrSession } from './qr-http-login'
 export type { SlackConfirmationChallenge, SlackConfirmationCodeRequest } from './qr-confirmation'
@@ -35,6 +37,8 @@ export type {
   SlackRTMUserTypingEvent,
   SlackRTMGenericEvent,
   SlackListenerEventMap,
+  SlackHuddleChanged,
+  SlackHuddleRoomJoined,
   WorkspaceCredentials,
   Config,
 } from './types'

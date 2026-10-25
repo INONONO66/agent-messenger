@@ -4,6 +4,7 @@ import WebSocket from 'ws'
 
 import type { SlackClient } from './client'
 import type { SlackListenerEventMap, SlackRTMGenericEvent } from './types'
+import { SlackHuddleChangedSchema, SlackHuddleRoomJoinedSchema } from './types'
 
 const PING_INTERVAL = 30_000
 const PONG_TIMEOUT = 10_000
@@ -76,7 +77,7 @@ export class SlackListener {
       this.ws = ws
 
       ws.on('open', () => {
-        if (!this.running) {
+        if (!this.running || this.ws !== ws) {
           ws.close()
           return
         }
@@ -85,6 +86,7 @@ export class SlackListener {
       })
 
       ws.on('message', (raw) => {
+        if (!this.running || this.ws !== ws) return
         try {
           const data = JSON.parse(raw.toString())
           this.handleEvent(data)
@@ -94,8 +96,9 @@ export class SlackListener {
       })
 
       ws.on('close', () => {
+        if (this.ws !== ws) return
         this.clearTimers()
-        if (this.ws === ws) this.ws = null
+        this.ws = null
         if (this.running) {
           this.emitter.emit('disconnected')
           this.scheduleReconnect()
@@ -103,6 +106,7 @@ export class SlackListener {
       })
 
       ws.on('error', (err) => {
+        if (!this.running || this.ws !== ws) return
         this.emitter.emit('error', err instanceof Error ? err : new Error(String(err)))
         // onclose will fire after onerror, reconnect handled there
       })
@@ -135,7 +139,20 @@ export class SlackListener {
       return
     }
 
-    this.emitter.emit(event.type, event)
+    switch (event.type) {
+      case 'user_huddle_changed': {
+        const parsed = SlackHuddleChangedSchema.safeParse(event)
+        if (parsed.success) this.emitter.emit(event.type, parsed.data)
+        break
+      }
+      case 'sh_room_join': {
+        const parsed = SlackHuddleRoomJoinedSchema.safeParse(event)
+        if (parsed.success) this.emitter.emit(event.type, parsed.data)
+        break
+      }
+      default:
+        this.emitter.emit(event.type, event)
+    }
     this.emitter.emit('slack_event', event)
   }
 
