@@ -18,6 +18,13 @@ export interface TelegramAccountMessage {
     readonly voice?: boolean
   }[]
   readonly replyToMessageId?: string
+  readonly botMessageId?: string
+  readonly botReplyToMessageId?: string
+  readonly threadId?: string
+  readonly botThreadId?: string
+  readonly sender:
+    | { readonly kind: 'user'; readonly id: string; readonly isBot: boolean }
+    | { readonly kind: 'chat'; readonly id: string }
 }
 
 export interface TelegramHistoryPage {
@@ -26,13 +33,30 @@ export interface TelegramHistoryPage {
 }
 
 export type TelegramSendContent =
-  | { readonly kind: 'text'; readonly text: string; readonly replyTo?: string }
+  | { readonly kind: 'text'; readonly text: string; readonly replyTo?: string; readonly threadId?: string }
   | {
       readonly kind: 'image' | 'audio' | 'voice' | 'video' | 'file'
       readonly path: string
       readonly caption?: string
       readonly replyTo?: string
+      readonly threadId?: string
     }
+  | TelegramSendBytes
+
+export type TelegramSendBytes = {
+  readonly kind: 'image' | 'audio' | 'voice' | 'video' | 'file'
+  readonly bytes: Uint8Array
+  readonly name: string
+  readonly mime: string
+  readonly caption?: string
+  readonly replyTo?: string
+  readonly threadId?: string
+}
+
+export type TelegramAccountState =
+  | { readonly state: 'ready'; readonly userId: string }
+  | { readonly state: 'login_action_required'; readonly action: Exclude<TelegramLoginAction, 'ready'> }
+  | { readonly state: 'closed'; readonly reason: 'session_lost' | 'closed' }
 
 export interface TelegramAccountClient {
   start(input: {
@@ -49,6 +73,7 @@ export interface TelegramAccountClient {
     readonly emailCode?: string
   }): Promise<{ readonly state: TelegramLoginAction; readonly userId?: string }>
   onMessage(handler: (message: TelegramAccountMessage) => void): () => void
+  onState(handler: (state: TelegramAccountState) => void): () => void
   history(chatId: string, options: { readonly before?: string; readonly limit: number }): Promise<TelegramHistoryPage>
   download(
     fileId: number,
@@ -59,7 +84,10 @@ export interface TelegramAccountClient {
     readonly mime: string
     readonly size: number
   }>
-  send(chatId: string, content: TelegramSendContent): Promise<{ readonly messageId: string }>
+  send(
+    chatId: string,
+    content: TelegramSendContent,
+  ): Promise<{ readonly messageId: string; readonly botMessageId?: string }>
   close(): Promise<void>
 }
 

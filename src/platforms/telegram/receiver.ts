@@ -21,6 +21,12 @@ type Pending = {
   reject: (error: Error) => void
 }
 
+export class TdDispatchError extends Error {
+  constructor(cause: Error) {
+    super(cause.message, { cause })
+  }
+}
+
 export class TdReceiver {
   private static readonly receivers = new WeakMap<TdBinding, TdReceiver>()
   private readonly clients = new Map<number, Set<(event: TdEvent) => void>>()
@@ -84,7 +90,7 @@ export class TdReceiver {
       } catch (error) {
         clearTimeout(timer)
         requests.delete(extra)
-        reject(error instanceof Error ? error : new Error(String(error)))
+        reject(new TdDispatchError(error instanceof Error ? error : new Error(String(error))))
       }
     })
   }
@@ -118,6 +124,9 @@ export class TdReceiver {
       for (const requests of this.pending.values()) {
         for (const pending of requests.values()) pending.reject(this.failure)
         requests.clear()
+      }
+      for (const listeners of this.clients.values()) {
+        for (const listener of listeners) listener({ '@type': 'receiverFailure' })
       }
     } finally {
       this.running = false

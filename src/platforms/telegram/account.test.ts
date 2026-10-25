@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { spyOn } from 'bun:test'
-import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises'
+import { readFileSync, statSync } from 'node:fs'
+import { mkdtemp, readdir, rm, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAccountClient } from './account'
-import { parseAccountMessage } from './account-message'
+import { botMessageId, parseAccountMessage } from './account-message'
 import { TdReceiver } from './receiver'
 import { TdjsonBinding } from './tdlib'
 import { TelegramError } from './types'
@@ -21,7 +22,7 @@ function inertDeadline(): ReturnType<typeof setTimeout> {
 class FakeTdjson {
   readonly sent: { clientId: number; request: Event }[] = []
   private queue: Event[] = []
-  private waiting?: (event: Event) => void
+  private waiting?: { resolve: (event: Event) => void; reject: (error: Error) => void }
   private nextId = 0
   receiveCount = 0
   onSend: (clientId: number, request: Event) => void = () => {}
@@ -39,15 +40,21 @@ class FakeTdjson {
     this.receiveCount++
     const event = this.queue.shift()
     if (event) return Promise.resolve(event)
-    return new Promise((resolve) => {
-      this.waiting = resolve
+    return new Promise((resolve, reject) => {
+      this.waiting = { resolve, reject }
     })
+  }
+
+  failReceive(error: Error): void {
+    const waiting = this.waiting
+    this.waiting = undefined
+    waiting?.reject(error)
   }
 
   emit(clientId: number, event: Event): void {
     const message = { ...event, '@client_id': clientId }
     if (this.waiting) {
-      const resolve = this.waiting
+      const { resolve } = this.waiting
       this.waiting = undefined
       resolve(message)
     } else this.queue.push(message)
@@ -69,7 +76,10 @@ async function started(state = 'authorizationStateReady') {
   directories.push(dir)
   fake.onSend = (id, request) => {
     if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': state })
-    if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
+    if (request['@type'] === 'getMe') {
+      fake.emit(id, { '@type': 'updateUser', user: { id: 27, type: { '@type': 'userTypeRegular' } } })
+      fake.reply(id, request, { '@type': 'user', id: 27 })
+    }
   }
   const client = createAccountClient(fake)
   const input = { apiId: 42, apiHash: 'hash', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }
@@ -142,6 +152,149 @@ describe('TDJSON receive ownership', () => {
 })
 
 describe('account authorization', () => {
+  it.each([
+    ['authorizationStateWaitPhoneNumber', 'phone'],
+    ['authorizationStateWaitCode', 'code'],
+    ['authorizationStateWaitPassword', 'password'],
+    ['authorizationStateWaitEmailAddress', 'email'],
+    ['authorizationStateWaitEmailCode', 'email_code'],
+  ])('notifies a pre-start state subscriber of %s', async (authorization, action) => {
+    const fake = new FakeTdjson()
+    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
+    directories.push(dir)
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': authorization })
+    }
+    const client = createAccountClient(fake)
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
+    expect(states).toEqual([{ state: 'login_action_required', action }])
+  })
+
+  it('observes sign-in before start, ready, revocation and one terminal closure', async () => {
+    const fake = new FakeTdjson()
+    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
+    directories.push(dir)
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getAuthorizationState')
+        fake.reply(id, request, { '@type': 'authorizationStateWaitPhoneNumber' })
+      if (request['@type'] === 'setAuthenticationPhoneNumber') {
+        fake.emit(id, {
+          '@type': 'updateAuthorizationState',
+          authorization_state: { '@type': 'authorizationStateReady' },
+        })
+        fake.reply(id, request, { '@type': 'ok' })
+      }
+      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
+    }
+    const client = createAccountClient(fake)
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    const input = { apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }
+    expect(await client.start(input)).toMatchObject({ state: 'phone' })
+    expect(await client.authenticate({ phone: '+123' })).toMatchObject({ state: 'ready', userId: '27' })
+    const lost = new Promise<void>((resolve) =>
+      client.onState((state) => {
+        if (state.state === 'closed') resolve()
+      }),
+    )
+    fake.emit(1, { '@type': 'updateAuthorizationState', authorization_state: { '@type': 'authorizationStateClosing' } })
+    await lost
+    fake.emit(1, { '@type': 'updateAuthorizationState', authorization_state: { '@type': 'authorizationStateClosed' } })
+    expect(states).toEqual([
+      { state: 'login_action_required', action: 'phone' },
+      { state: 'ready', userId: '27' },
+      { state: 'closed', reason: 'session_lost' },
+    ])
+    await expect(client.history('33', { limit: 1 })).rejects.toMatchObject({ code: 'session_lost' })
+    await expect(client.send('33', { kind: 'text', text: 'x' })).rejects.toMatchObject({ code: 'not_sent' })
+  })
+
+  it('emits one explicit close and no session lost state', async () => {
+    const { client, fake } = await started()
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'close') {
+        fake.emit(id, {
+          '@type': 'updateAuthorizationState',
+          authorization_state: { '@type': 'authorizationStateClosed' },
+        })
+        fake.reply(id, request, { '@type': 'ok' })
+      }
+    }
+    await client.close()
+    await client.close()
+    expect(states).toEqual([{ state: 'closed', reason: 'closed' }])
+    expect(fake.sent.filter(({ request }) => request['@type'] === 'close')).toHaveLength(1)
+  })
+
+  it('settles one closed state even if TDLib refuses the close request', async () => {
+    const { client, fake } = await started()
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'close')
+        fake.reply(id, request, { '@type': 'error', code: 500, message: 'close refused' })
+    }
+    await expect(client.close()).rejects.toMatchObject({ code: 'unknown' })
+    await client.close()
+    expect(states).toEqual([{ state: 'closed', reason: 'closed' }])
+  })
+
+  it('settles a pre-start close exactly once', async () => {
+    const client = createAccountClient(new FakeTdjson())
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    await client.close()
+    await client.close()
+    expect(states).toEqual([{ state: 'closed', reason: 'closed' }])
+  })
+
+  it('reports verified ready identity to a subscriber registered before start', async () => {
+    const fake = new FakeTdjson()
+    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
+    directories.push(dir)
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': 'authorizationStateReady' })
+      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
+    }
+    const client = createAccountClient(fake)
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
+    expect(states).toEqual([{ state: 'ready', userId: '27' }])
+  })
+
+  it('removes a state subscription without affecting other observers', async () => {
+    const fake = new FakeTdjson()
+    const client = createAccountClient(fake)
+    const seen: Event[] = []
+    const stop = client.onState((state) => seen.push(state))
+    stop()
+    await client.close()
+    expect(seen).toEqual([])
+  })
+
+  it('withdraws mounted operations when authorization asks for another login action', async () => {
+    const { client, fake } = await started()
+    const states: Event[] = []
+    client.onState((state) => states.push(state))
+    const requested = new Promise<void>((resolve) =>
+      client.onState((state) => {
+        if (state.state === 'login_action_required') resolve()
+      }),
+    )
+    fake.emit(1, {
+      '@type': 'updateAuthorizationState',
+      authorization_state: { '@type': 'authorizationStateWaitPassword' },
+    })
+    await requested
+    expect(states).toEqual([{ state: 'login_action_required', action: 'password' }])
+    await expect(client.history('33', { limit: 1 })).rejects.toMatchObject({ code: 'session_lost' })
+  })
+
   it.each([
     ['authorizationStateWaitPhoneNumber', 'phone'],
     ['authorizationStateWaitCode', 'code'],
@@ -279,6 +432,63 @@ describe('account authorization', () => {
 })
 
 describe('message parsing', () => {
+  it('maps only server-backed native ids and preserves every native topic kind', () => {
+    const text = { '@type': 'messageText', text: { text: 'hello', entities: [] } }
+    const server = 42 * 1048576
+    expect([server, server + 1, server + 2, server + 4, (2147483647 + 1) * 1048576].map(botMessageId)).toEqual([
+      '42',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(botMessageId(2147483647 * 1048576)).toBe('2147483647')
+    expect(botMessageId('9007199254740993')).toBeUndefined()
+    const variants = [
+      ['messageTopicForum', 'forum_topic_id', 1, 'forum:1', undefined],
+      ['messageTopicForum', 'forum_topic_id', 7, 'forum:7', '7'],
+      ['messageTopicThread', 'message_thread_id', server, `thread:${server}`, '42'],
+      ['messageTopicDirectMessages', 'direct_messages_chat_topic_id', 9, 'direct:9', undefined],
+      ['messageTopicSavedMessages', 'saved_messages_topic_id', 11, 'saved:11', undefined],
+    ] as const
+    for (const [kind, field, value, threadId, botThreadId] of variants) {
+      const raw = {
+        ...message(text, server),
+        reply_to: {
+          '@type': 'messageReplyToMessage',
+          chat_id: 33,
+          message_id: server,
+        },
+        topic_id: { '@type': kind, [field]: value },
+      }
+      const parsed = parseAccountMessage(raw, 'chatTypePrivate', new Map(), true)
+      expect(parsed).toMatchObject({
+        messageId: String(server),
+        botMessageId: '42',
+        replyToMessageId: String(server),
+        botReplyToMessageId: '42',
+        threadId,
+        sender: { kind: 'user', id: '27', isBot: true },
+      })
+      expect(parsed?.botThreadId).toBe(botThreadId)
+    }
+    const raw = {
+      ...message(text, server),
+      reply_to: {
+        '@type': 'messageReplyToMessage',
+        chat_id: 44,
+        message_id: server,
+        origin: { '@type': 'messageOriginUser' },
+      },
+    }
+    expect(parseAccountMessage(raw, undefined, new Map(), false)?.botReplyToMessageId).toBeUndefined()
+    expect(parseAccountMessage({ ...raw, sender_id: { '@type': 'messageSenderChat', chat_id: 55 } })?.sender).toEqual({
+      kind: 'chat',
+      id: '55',
+    })
+    expect(parseAccountMessage(message(text, server), undefined, new Map())).toBeUndefined()
+  })
+
   it('parses text, captions, all five media kinds and only resolved mentions', () => {
     const mention = {
       text: 'hi @plain @known',
@@ -337,7 +547,12 @@ describe('message parsing', () => {
         6,
       ],
     ]
-    const text = parseAccountMessage(message({ '@type': 'messageText', text: mention }), 'chatTypePrivate')
+    const text = parseAccountMessage(
+      message({ '@type': 'messageText', text: mention }),
+      'chatTypePrivate',
+      new Map(),
+      false,
+    )
     expect(text).toMatchObject({
       chatId: '33',
       senderId: '27',
@@ -347,7 +562,7 @@ describe('message parsing', () => {
       media: [],
     })
     for (const [content, kind, id, voice] of cases) {
-      const parsed = parseAccountMessage(message(content), 'chatTypeBasicGroup')
+      const parsed = parseAccountMessage(message(content), 'chatTypeBasicGroup', new Map(), false)
       expect(parsed?.media[0]).toMatchObject({ kind, fileId: id, ...(voice && { voice }) })
       expect(parsed?.dm).toBe(false)
     }
@@ -400,6 +615,284 @@ describe('message parsing', () => {
 })
 
 describe('history, sends and downloads', () => {
+  it('distinguishes synchronous dispatch refusal from lost receive after dispatch', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (_id, request) => {
+      if (request['@type'] === 'sendMessage') throw new Error('binding refused before TDLib')
+    }
+    await expect(client.send('33', { kind: 'text', text: 'x' })).rejects.toMatchObject({ code: 'not_sent' })
+    let sent: (() => void) | undefined
+    const dispatched = new Promise<void>((resolve) => {
+      sent = resolve
+    })
+    fake.onSend = (_id, request) => {
+      if (request['@type'] === 'sendMessage') sent?.()
+    }
+    const pending = client.send('33', { kind: 'text', text: 'x' })
+    await dispatched
+    fake.failReceive(new Error('transport lost after dispatch'))
+    await expect(pending).rejects.toMatchObject({ code: 'unknown' })
+    expect(fake.sent.filter(({ request }) => request['@type'] === 'sendMessage')).toHaveLength(2)
+  })
+
+  it('classifies deletion of an unconfirmed temporary send as unknown', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] !== 'sendMessage') return
+      fake.emit(id, { '@type': 'updateDeleteMessages', message_ids: [70] })
+      fake.reply(id, request, { '@type': 'message', id: 70 })
+    }
+    await expect(client.send('33', { kind: 'text', text: 'x' })).rejects.toMatchObject({ code: 'unknown' })
+  })
+
+  it('round trips native topics and rejects invalid thread ids before dispatch', async () => {
+    const { client, fake } = await started()
+    let temporary = 0
+    fake.onSend = (id, request) => {
+      if (request['@type'] !== 'sendMessage') return
+      const old = ++temporary
+      fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: old, message: { id: 42 * 1048576 } })
+      fake.reply(id, request, { '@type': 'message', id: old })
+    }
+    const topics = [
+      ['forum:7', 'messageTopicForum', 'forum_topic_id', 7],
+      [`thread:${42 * 1048576}`, 'messageTopicThread', 'message_thread_id', 42 * 1048576],
+      ['direct:9', 'messageTopicDirectMessages', 'direct_messages_chat_topic_id', 9],
+      ['saved:11', 'messageTopicSavedMessages', 'saved_messages_topic_id', 11],
+    ] as const
+    for (const [threadId, kind, field, value] of topics) {
+      expect(await client.send('33', { kind: 'text', text: 'hello', threadId })).toEqual({
+        messageId: String(42 * 1048576),
+        botMessageId: '42',
+      })
+      const request = fake.sent.at(-1)?.request
+      expect(request.topic_id).toMatchObject({ '@type': kind, [field]: value })
+    }
+    const sent = fake.sent.length
+    await expect(client.send('33', { kind: 'text', text: 'hello', threadId: 'forum:../x' })).rejects.toMatchObject({
+      code: 'not_sent',
+    })
+    expect(fake.sent).toHaveLength(sent)
+  })
+
+  it('resolves cached bot and chat sender kinds and gets an uncached user once', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getUser')
+        fake.reply(id, request, { '@type': 'user', id: request.user_id, type: { '@type': 'userTypeBot' } })
+      if (request['@type'] === 'getChat')
+        fake.reply(id, request, { '@type': 'chat', type: { '@type': 'chatTypeBasicGroup' } })
+    }
+    const received: Event[] = []
+    let deliver: ((value: Event) => void) | undefined
+    const next = () =>
+      new Promise<Event>((resolve) => {
+        deliver = resolve
+      })
+    client.onMessage((value) => {
+      received.push(value)
+      deliver?.(value)
+    })
+    fake.emit(1, { '@type': 'updateUser', user: { id: 88, type: { '@type': 'userTypeBot' } } })
+    for (const [sender, expected] of [
+      [
+        { '@type': 'messageSenderUser', user_id: 88 },
+        { kind: 'user', id: '88', isBot: true },
+      ],
+      [
+        { '@type': 'messageSenderUser', user_id: 27 },
+        { kind: 'user', id: '27', isBot: false },
+      ],
+      [
+        { '@type': 'messageSenderChat', chat_id: 99 },
+        { kind: 'chat', id: '99' },
+      ],
+      [
+        { '@type': 'messageSenderUser', user_id: 77 },
+        { kind: 'user', id: '77', isBot: true },
+      ],
+    ] as const) {
+      const signal = next()
+      fake.emit(1, {
+        '@type': 'updateNewMessage',
+        message: { ...message({ '@type': 'messageText', text: { text: 'hi', entities: [] } }), sender_id: sender },
+      })
+      expect((await signal).sender).toEqual(expected)
+    }
+    expect(received).toHaveLength(4)
+    expect(fake.sent.filter(({ request }) => request['@type'] === 'getUser')).toHaveLength(1)
+  })
+
+  it('does not publish a sender whose offline user type is unknown', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getUser')
+        fake.reply(id, request, { '@type': 'user', id: 91, type: { '@type': 'userTypeUnknown' } })
+      if (request['@type'] === 'getChat')
+        fake.reply(id, request, { '@type': 'chat', type: { '@type': 'chatTypePrivate' } })
+    }
+    const messages: Event[] = []
+    client.onMessage((entry) => messages.push(entry))
+    const closed = new Promise<Event>((resolve) =>
+      client.onState((state) => {
+        if (state.state === 'closed') resolve(state)
+      }),
+    )
+    fake.emit(1, {
+      '@type': 'updateNewMessage',
+      message: {
+        ...message({ '@type': 'messageText', text: { text: 'hi', entities: [] } }),
+        sender_id: { '@type': 'messageSenderUser', user_id: 91 },
+      },
+    })
+    expect(await closed).toEqual({ state: 'closed', reason: 'session_lost' })
+    expect(messages).toEqual([])
+  })
+
+  it('treats a deleted cached user as non-bot but refuses unknown and missing offline facts', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getChat')
+        fake.reply(id, request, { '@type': 'chat', type: { '@type': 'chatTypePrivate' } })
+      if (request['@type'] === 'getUser')
+        fake.reply(id, request, { '@type': 'error', code: 404, message: 'user missing' })
+    }
+    const received = new Promise<Event>((resolve) => client.onMessage(resolve))
+    fake.emit(1, { '@type': 'updateUser', user: { id: 92, type: { '@type': 'userTypeDeleted' } } })
+    fake.emit(1, {
+      '@type': 'updateNewMessage',
+      message: {
+        ...message({ '@type': 'messageText', text: { text: 'hi', entities: [] } }),
+        sender_id: { '@type': 'messageSenderUser', user_id: 92 },
+      },
+    })
+    expect((await received).sender).toEqual({ kind: 'user', id: '92', isBot: false })
+    const closed = new Promise<Event>((resolve) =>
+      client.onState((state) => {
+        if (state.state === 'closed') resolve(state)
+      }),
+    )
+    fake.emit(1, {
+      '@type': 'updateNewMessage',
+      message: {
+        ...message({ '@type': 'messageText', text: { text: 'no', entities: [] } }),
+        sender_id: { '@type': 'messageSenderUser', user_id: 93 },
+      },
+    })
+    expect(await closed).toEqual({ state: 'closed', reason: 'session_lost' })
+  })
+
+  it('refuses oversized outbound bytes before creating staging or dispatching', async () => {
+    const { client, fake, input } = await started()
+    const sends = fake.sent.length
+    await expect(
+      client.send('33', {
+        kind: 'file',
+        bytes: new Uint8Array(50 * 1024 * 1024 + 1),
+        name: 'large',
+        mime: 'application/octet-stream',
+      }),
+    ).rejects.toMatchObject({ code: 'media_too_large' })
+    expect(fake.sent).toHaveLength(sends)
+    expect(await readdir(input.filesDir)).toEqual([])
+  })
+
+  it('stages each media byte kind privately and removes staging after confirmation', async () => {
+    const { client, fake, input } = await started()
+    let sequence = 0
+    fake.onSend = (id, request) => {
+      if (request['@type'] !== 'sendMessage') return
+      const file = request.input_message_content
+      const path = (file.photo ?? file.audio ?? file.voice_note ?? file.video ?? file.document).path
+      expect(path.startsWith(input.filesDir)).toBe(true)
+      expect(readFileSync(path)).toEqual(Buffer.from([1, 2, 3]))
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+      expect(statSync(join(path, '..')).mode & 0o777).toBe(0o700)
+      const temp = ++sequence
+      fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: temp, message: { id: temp + 100 } })
+      fake.reply(id, request, { '@type': 'message', id: temp })
+    }
+    for (const kind of ['image', 'audio', 'voice', 'video', 'file'] as const) {
+      const bytes = new Uint8Array([1, 2, 3])
+      await client.send('33', { kind, bytes, name: '../../escape', mime: 'application/octet-stream' })
+      expect(await readdir(input.filesDir)).toEqual([])
+    }
+    expect(sequence).toBe(5)
+  })
+
+  it('removes byte staging on explicit refusal and ambiguous confirmation', async () => {
+    const { client, fake, input } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'sendMessage')
+        fake.reply(id, request, { '@type': 'error', code: 403, message: 'CHAT_WRITE_FORBIDDEN' })
+    }
+    const content = { kind: 'file' as const, bytes: new Uint8Array([1, 2]), name: 'x', mime: 'text/plain' }
+    await expect(client.send('33', content)).rejects.toMatchObject({ code: 'not_sent' })
+    expect(await readdir(input.filesDir)).toEqual([])
+    let sent: (() => void) | undefined
+    const dispatched = new Promise<void>((resolve) => {
+      sent = resolve
+    })
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'sendMessage') {
+        fake.reply(id, request, { '@type': 'message', id: 50 })
+        sent?.()
+      }
+      if (request['@type'] === 'close') {
+        fake.emit(id, {
+          '@type': 'updateAuthorizationState',
+          authorization_state: { '@type': 'authorizationStateClosed' },
+        })
+        fake.reply(id, request, { '@type': 'ok' })
+      }
+    }
+    const sending = client.send('33', content)
+    await dispatched
+    const closing = client.close()
+    await expect(sending).rejects.toMatchObject({ code: 'unknown' })
+    await closing
+    expect(await readdir(input.filesDir)).toEqual([])
+  })
+
+  it('rejects a pending confirmation when closing and cleans staged bytes', async () => {
+    const fake = new FakeTdjson()
+    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
+    directories.push(dir)
+    const filesDir = join(dir, 'files')
+    let waiting: (() => void) | undefined
+    const confirmationWaiter = new Promise<void>((resolve) => {
+      waiting = resolve
+    })
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': 'authorizationStateReady' })
+      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
+      if (request['@type'] === 'sendMessage') fake.reply(id, request, { '@type': 'message', id: 50 })
+      if (request['@type'] === 'close') {
+        fake.emit(id, {
+          '@type': 'updateAuthorizationState',
+          authorization_state: { '@type': 'authorizationStateClosed' },
+        })
+        fake.reply(id, request, { '@type': 'ok' })
+      }
+    }
+    const client = createAccountClient(fake, (_callback) => {
+      waiting?.()
+      return inertDeadline()
+    })
+    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir })
+    const sending = client.send('33', {
+      kind: 'file',
+      bytes: new Uint8Array([1]),
+      name: 'x',
+      mime: 'application/octet-stream',
+    })
+    await confirmationWaiter
+    const closing = client.close()
+    await expect(sending).rejects.toMatchObject({ code: 'unknown' })
+    await closing
+    expect(await readdir(filesDir)).toEqual([])
+  })
+
   it('pages with an exclusive cursor even for short pages and equal dates', async () => {
     const { client, fake } = await started()
     const seen: Event[] = []
@@ -490,11 +983,15 @@ describe('history, sends and downloads', () => {
     await expect(unknown).rejects.toMatchObject({ code: 'unknown' })
     fake.onSend = (id, request) => {
       if (request['@type'] === 'sendMessage') {
-        fake.emit(id, { '@type': 'updateMessageSendFailed', old_message_id: 99, error_message: 'upload rejected' })
+        fake.emit(id, {
+          '@type': 'updateMessageSendFailed',
+          old_message_id: 99,
+          error: { '@type': 'error', code: 403, message: 'upload rejected' },
+        })
         fake.reply(id, request, { '@type': 'message', id: 99 })
       }
     }
-    await expect(client.send('33', { kind: 'text', text: 'payload' })).rejects.toMatchObject({ code: 'unknown' })
+    await expect(client.send('33', { kind: 'text', text: 'payload' })).rejects.toMatchObject({ code: 'not_sent' })
     fake.onSend = (id, request) => {
       if (request['@type'] === 'sendMessage')
         fake.reply(id, request, { '@type': 'error', message: 'FILE_TOO_BIG', code: 400 })
