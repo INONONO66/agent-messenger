@@ -107,6 +107,7 @@ export class TelegramAccountError extends Error {
   constructor(
     message: string,
     readonly code: TelegramAccountErrorCode,
+    readonly requestRefused = false,
   ) {
     super(message)
   }
