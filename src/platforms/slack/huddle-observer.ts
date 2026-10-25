@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
-import { huddleFailure, SlackHuddleError, type HuddleStart, type SlackHuddleEvent } from './huddle-contract'
+import type { CdpFields } from './huddle-cdp'
+import { huddleFailure, JsonText, SlackHuddleError, type HuddleRequest, type SlackHuddleEvent } from './huddle-contract'
 import { huddleSelectors } from './huddle-selectors'
 import { SlackHuddleRoomJoinedSchema, type SlackHuddleRoomJoined } from './types'
 
@@ -21,7 +22,9 @@ export const HuddleSnapshot = z.object({
 })
 export type HuddleSnapshot = z.infer<typeof HuddleSnapshot>
 const Binding = z.object({ name: z.literal('huddleState'), payload: z.string() })
+const PageState = JsonText.pipe(HuddleSnapshot)
 const Frame = z.object({ response: z.object({ opcode: z.number(), payloadData: z.string() }) })
+const Navigation = z.object({ frame: z.object({ url: z.string(), parentId: z.string().optional() }) })
 
 /** Room evidence and peer tiles are both required; silence/mute is never departure. */
 export class HuddleObserver {
@@ -32,7 +35,7 @@ export class HuddleObserver {
   private departed = false
   private readonly waiting = new Set<() => void>()
   constructor(
-    readonly input: HuddleStart,
+    readonly input: HuddleRequest,
     private readonly terminal: (event: Exclude<SlackHuddleEvent, { type: 'ready' }>) => void,
   ) {}
 
@@ -70,22 +73,20 @@ export class HuddleObserver {
     })
   }
 
-  cdp(method: string, params: unknown): void {
+  cdp(method: string, params: CdpFields): void {
     switch (method) {
       case 'Runtime.bindingCalled': {
         const binding = Binding.safeParse(params)
-        if (binding.success) this.page(JSON.parse(binding.data.payload))
+        if (binding.success) this.page(this.state(binding.data.payload))
         break
       }
       case 'Network.webSocketFrameReceived': {
         const frame = Frame.parse(params)
-        if (frame.response.opcode === 1) this.wire(JSON.parse(frame.response.payloadData))
+        if (frame.response.opcode === 1) this.frame(frame.response.payloadData)
         break
       }
       case 'Page.frameNavigated': {
-        const navigation = z
-          .object({ frame: z.object({ url: z.string(), parentId: z.string().optional() }) })
-          .parse(params)
+        const navigation = Navigation.parse(params)
         if (!navigation.frame.parentId && this.snapshot) {
           this.page({ ...this.snapshot, url: navigation.frame.url })
           this.checkLocation()
@@ -99,12 +100,23 @@ export class HuddleObserver {
     }
   }
 
-  page(value: unknown): void {
-    const parsed = HuddleSnapshot.safeParse(value)
+  private state(payload: string): HuddleSnapshot {
+    const parsed = PageState.safeParse(payload)
     if (!parsed.success) throw new SlackHuddleError('voice_join_failed', 'page_state_invalid')
-    this.snapshot = parsed.data
+    return parsed.data
+  }
+
+  private frame(payload: string): void {
+    const value = JsonText.safeParse(payload)
+    if (!value.success) throw new SlackHuddleError('voice_join_failed', 'page_state_invalid')
+    const event = SlackHuddleRoomJoinedSchema.safeParse(value.data)
+    if (event.success) this.wire(event.data)
+  }
+
+  page(state: HuddleSnapshot): void {
+    this.snapshot = state
     if (this.ready) {
-      if (parsed.data.leave === 0) {
+      if (state.leave === 0) {
         this.terminal({ type: 'disconnected', reason: 'room_left' })
         this.changed()
         return
@@ -122,10 +134,7 @@ export class HuddleObserver {
     this.changed()
   }
 
-  wire(value: unknown): void {
-    const parsed = SlackHuddleRoomJoinedSchema.safeParse(value)
-    if (!parsed.success) return
-    const event = parsed.data
+  wire(event: SlackHuddleRoomJoined): void {
     if (event.huddle.channel_id !== this.input.channelId) return
     if (!this.room && event.user !== this.input.seatId) return
     if (this.room && event.room.id !== this.room.room.id) {
@@ -205,8 +214,20 @@ export class HuddleObserver {
   joined(): boolean {
     const state = this.snapshot
     if (!state?.leave || !this.room) return false
+    this.inRoom(state, true)
+    return true
+  }
+
+  /** Re-checks the joined room after unmute, immediately before readiness is published. */
+  admitted(): void {
+    if (!this.snapshot) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
+    this.inRoom(this.snapshot, false)
+  }
+
+  private inRoom(state: HuddleSnapshot, muted: boolean): void {
     this.checkLocation()
-    if (state.leave !== 1) throw new SlackHuddleError('voice_join_failed', 'selector_ambiguous')
+    const leave = state.leave ? 'selector_ambiguous' : 'selector_missing'
+    if (state.leave !== 1) throw new SlackHuddleError('voice_join_failed', leave)
     if (state.channelActive !== 1) {
       throw new SlackHuddleError('voice_join_failed', state.channelActive ? 'selector_ambiguous' : 'selector_missing')
     }
@@ -214,8 +235,8 @@ export class HuddleObserver {
       throw new SlackHuddleError('voice_join_failed', 'confirmation_pending')
     }
     this.isolated()
-    if (state.muted !== true) throw new SlackHuddleError('voice_join_failed', 'microphone_not_muted')
-    return true
+    const microphone = muted ? 'microphone_not_muted' : 'microphone_not_unmuted'
+    if (state.muted !== muted) throw new SlackHuddleError('voice_join_failed', microphone)
   }
 
   markReady(): void {

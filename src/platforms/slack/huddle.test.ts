@@ -1,9 +1,22 @@
-import { expect, it, spyOn } from 'bun:test'
+import { afterAll, expect, it, spyOn } from 'bun:test'
 
 import { SlackClient, SlackError } from './client'
 import { createHuddleJoin, joinHuddle } from './huddle'
 import { SlackHuddleError } from './huddle-contract'
-import { deferred, loopback, start } from './huddle-fixtures.test'
+import { deferred, loopback, removeFixtureProfileRoot, start } from './huddle-fixtures.test'
+
+afterAll(removeFixtureProfileRoot)
+
+/** Holds authentication open until the test resolves it. */
+function pendingAuth(client: SlackClient) {
+  const auth = deferred<{ user_id: string; team_id: string }>()
+  const called = deferred<void>()
+  const spy = spyOn(client, 'testAuth').mockImplementation(() => {
+    called.resolve()
+    return auth.promise
+  })
+  return { auth, called: called.promise, spy }
+}
 
 it('uses supplied credentials, allows the same identity, and reserves pending and live seats', async () => {
   const f = loopback()
@@ -11,17 +24,12 @@ it('uses supplied credentials, allows the same identity, and reserves pending an
   f.wire.room.user = 'U1'
   f.wire.state.peers = ['U1']
   f.wire.room.room.participants = ['U1']
-  const auth = deferred<{ user_id: string; team_id: string }>()
-  const tested = deferred<void>()
   const client = new SlackClient({ retries: 0 })
-  const authenticate = spyOn(client, 'testAuth').mockImplementation(() => {
-    tested.resolve()
-    return auth.promise
-  })
-  const join = createHuddleJoin({ client: () => client, transport: () => f.transport, clock: f.clock })
+  const { auth, called, spy: authenticate } = pendingAuth(client)
+  const join = createHuddleJoin({ client: () => client, ...f })
   const options = { credentials: start.credentials, speakerId: 'U1' }
   const pending = join('T1', 'C1', options)
-  await tested.promise
+  await called
   await expect(join('T1', 'C1', options)).rejects.toEqual(new SlackHuddleError('voice_busy', 'seat_authenticating'))
   auth.resolve({ user_id: 'U1', team_id: 'T1' })
   const handle = await pending
@@ -44,9 +52,10 @@ it.each([
     client: () => client,
     transport: () => {
       spawns++
-      return f.transport
+      return f.transport()
     },
     clock: f.clock,
+    profileRoot: f.profileRoot,
   })
   await expect(join('T1', 'C1', { credentials: start.credentials, speakerId: 'U1' })).rejects.toEqual(
     new SlackHuddleError('voice_join_failed', detail),
@@ -66,7 +75,7 @@ it('credential revocation is typed and single-attempt auth never enters the wrap
   expect(auth).toHaveBeenCalledTimes(1)
   const f = loopback()
   spyOn(client, 'testAuth').mockRejectedValue(new SlackError('invalid_auth', 'invalid_auth'))
-  const join = createHuddleJoin({ client: () => client, transport: () => f.transport, clock: f.clock })
+  const join = createHuddleJoin({ client: () => client, ...f })
   await expect(join('T1', 'C1', { credentials: start.credentials, speakerId: 'U1' })).rejects.toEqual(
     new SlackHuddleError('voice_join_failed', 'credentials_refused'),
   )
@@ -75,17 +84,12 @@ it('credential revocation is typed and single-attempt auth never enters the wrap
 
 it('abort and the thirty-second authentication deadline release the pending reservation', async () => {
   const f = loopback()
-  const called = deferred<void>()
-  const auth = deferred<{ user_id: string; team_id: string }>()
   const client = new SlackClient({ retries: 0 })
-  spyOn(client, 'testAuth').mockImplementation(() => {
-    called.resolve()
-    return auth.promise
-  })
-  const join = createHuddleJoin({ client: () => client, transport: () => f.transport, clock: f.clock })
+  const { auth, called } = pendingAuth(client)
+  const join = createHuddleJoin({ client: () => client, ...f })
   const options = { credentials: start.credentials, speakerId: 'U1' }
   const pending = join('T1', 'C1', options).catch((error) => error)
-  await called.promise
+  await called
   f.clock.fire(30_000)
   expect(await pending).toEqual(new SlackHuddleError('voice_join_failed', 'join_timeout'))
   auth.resolve({ user_id: 'U2', team_id: 'T1' })
@@ -106,7 +110,7 @@ it('an abort during credential login refuses before auth and releases the reserv
     return client
   })
   const auth = spyOn(client, 'testAuth')
-  const join = createHuddleJoin({ client: () => client, transport: () => f.transport, clock: f.clock })
+  const join = createHuddleJoin({ client: () => client, ...f })
   await expect(
     join('T1', 'C1', { credentials: start.credentials, speakerId: 'U1', signal: abort.signal }),
   ).rejects.toEqual(new SlackHuddleError('voice_aborted', 'join_aborted'))

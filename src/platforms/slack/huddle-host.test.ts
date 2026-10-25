@@ -4,8 +4,8 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { EventQueue } from '../../shared/event-queue'
-import { HuddleReply } from './huddle-contract'
-import { Clock, Processes, Wire } from './huddle-fixtures.test'
+import { HuddleCommand, type HuddleReply } from './huddle-contract'
+import { Clock, failingClose, Processes, Wire } from './huddle-fixtures.test'
 import { runHuddleHost } from './huddle-host'
 import { HuddleProcesses } from './huddle-process'
 
@@ -28,6 +28,7 @@ it('the real WebClient transport and wrapper both refuse HTTP 429 without retry'
   expect(output + errors).not.toContain('cookie-fixture-secret')
 })
 import { deferred, start } from './huddle-fixtures.test'
+import { huddleSelectors } from './huddle-selectors'
 import { spawnHuddleHost } from './huddle-session'
 
 it('parent IPC EOF kills real audio roots and the browser grandchild, with exit and pipe receipts', async () => {
@@ -60,10 +61,12 @@ it('parent IPC EOF kills real audio roots and the browser grandchild, with exit 
     await ready.promise
     child.disconnect()
     expect(await exit.promise).toBe(0)
-    for (const command of ['pacat', 'parec', 'chromium']) {
+    for (const command of ['pacat', 'chromium']) {
       expect(output).toContain(`PIPE_CLOSED ${command}\n`)
       expect(output).toContain(`EXIT ${command} SIGKILL\n`)
     }
+    // The stand-in browser never admits the seat, so capture never starts.
+    expect(output).not.toContain('parec')
     expect(output.match(/EXIT pactl 0/g)).toHaveLength(6)
   } finally {
     if (child.exitCode === null) child.kill('SIGTERM')
@@ -75,9 +78,8 @@ it('the real host entry accepts leave before start without leaking a child', asy
   const left = deferred<void>()
   const exited = deferred<void>()
   const off = transport.subscribe(
-    (value) => {
-      const message = HuddleReply.parse(value)
-      if (message.type === 'left') left.resolve()
+    (reply) => {
+      if (reply?.type === 'left') left.resolve()
     },
     () => exited.resolve(),
   )
@@ -97,7 +99,7 @@ it('kills owned child process groups and ignores already retired group IDs', asy
   const exited = deferred<void>()
   const off = transport.subscribe(
     (message) => {
-      if (HuddleReply.parse(message).type === 'ready') ready.resolve()
+      if (message?.type === 'ready') ready.resolve()
     },
     () => exited.resolve(),
   )
@@ -116,16 +118,12 @@ function hostFixture(brokenBrowserClose = false) {
   const external = new Processes()
   const wire = new Wire()
   const clock = new Clock()
-  const browserProcesses = new HuddleProcesses(external.spawn, clock)
-  if (brokenBrowserClose) {
-    browserProcesses.close = async () => {
-      await HuddleProcesses.prototype.close.call(browserProcesses)
-      throw new Error('cleanup failed')
-    }
-  }
+  const browserProcesses = brokenBrowserClose
+    ? failingClose(external, clock)
+    : new HuddleProcesses(external.spawn, clock)
   const replies = new EventQueue<HuddleReply>()
   const finished = deferred<void>()
-  let receive = (_value: unknown) => {}
+  let receive = (_command: HuddleCommand | undefined) => {}
   const host = runHuddleHost(
     {
       send: (message) => replies.push(message),
@@ -143,7 +141,8 @@ function hostFixture(brokenBrowserClose = false) {
     },
   )
   return {
-    receive: (value: unknown) => receive(value),
+    // Commands cross the same parse as the production entry; unknown shapes arrive as undefined.
+    receive: (value: object) => receive(HuddleCommand.safeParse(value).data),
     replies: replies[Symbol.asyncIterator](),
     finished,
     host,
@@ -267,4 +266,36 @@ it('rejects captured PCM exceeding outstanding parent credit', async () => {
     reason: 'pcm_overflow',
   })
   await f.finished.promise
+})
+
+it('a join held at unmute reaches ready and delivers only bytes captured after admission', async () => {
+  const f = hostFixture()
+  f.wire.holdClick = huddleSelectors.microphone
+  const held = f.wire.next('held')
+  f.receive(start)
+  await held
+  // While admission is pending no capture exists, so no queued audio can overflow or leak.
+  expect(f.external.calls.some((call) => call.command === 'parec')).toBe(false)
+  f.wire.release()
+  expect((await f.replies.next()).value).toEqual({ type: 'ready' })
+  const capture = f.external.calls.find((call) => call.command === 'parec')?.child
+  capture?.output.write(Buffer.from([1, 0, 2, 0]))
+  expect((await f.replies.next()).value).toEqual({ type: 'pcm', data: Buffer.from([1, 0, 2, 0]).toString('base64') })
+  f.receive({ type: 'leave' })
+  expect((await f.replies.next()).value).toEqual({ type: 'left' })
+  await f.finished.promise
+})
+
+it('a capture-start failure refuses the join and cleans up every process', async () => {
+  const f = hostFixture()
+  f.external.failSpawn.add('parec')
+  f.receive(start)
+  expect((await f.replies.next()).value).toEqual({
+    type: 'error',
+    code: 'voice_join_failed',
+    reason: 'capture_failed',
+  })
+  expect((await f.replies.next()).value).toEqual({ type: 'left' })
+  await f.finished.promise
+  expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
 })
