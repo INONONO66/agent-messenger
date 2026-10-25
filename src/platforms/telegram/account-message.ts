@@ -22,7 +22,7 @@ const Formatted = z
   })
   .passthrough()
 
-const Message = z
+export const AccountMessageSchema = z
   .object({
     '@type': z.literal('message'),
     id: z.union([z.number(), z.string()]),
@@ -99,7 +99,7 @@ const Content = z.object({
   document: z.object({ document: File, file_name: z.string(), mime_type: z.string() }).optional(),
 })
 
-type AccountMessage = z.infer<typeof Message>
+type AccountMessage = z.infer<typeof AccountMessageSchema>
 type Body = z.infer<typeof Content>
 type Formatted = z.infer<typeof Formatted>
 type Media = TelegramAccountMessage['media'][number]
@@ -235,15 +235,13 @@ function replyOf(message: AccountMessage): {
 }
 
 export function parseAccountMessage(
-  raw: unknown,
+  message: AccountMessage,
   chatType?: string,
   resolvedUsernames: ReadonlyMap<string, string> = new Map(),
   userIsBot?: boolean,
 ): TelegramAccountMessage | undefined {
-  const result = Message.safeParse(raw)
-  const typed = Content.safeParse(result.data?.content)
-  if (!result.success || !typed.success) return undefined
-  const message = result.data
+  const typed = Content.safeParse(message.content)
+  if (!typed.success) return undefined
   const type = message.content['@type']
   const formatted = type === 'messageText' ? typed.data.text : typed.data.caption
   if (type === 'messageText' && !formatted) return undefined
