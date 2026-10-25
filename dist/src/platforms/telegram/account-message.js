@@ -31,13 +31,55 @@ const Message = z
     is_outgoing: z.boolean(),
     date: z.number(),
     reply_to: z
-        .object({ message_id: z.union([z.number(), z.string()]).optional() })
+        .object({
+        '@type': z.string().optional(),
+        message_id: z.union([z.number(), z.string()]).optional(),
+        chat_id: z.union([z.number(), z.string()]).optional(),
+        origin: z.unknown().optional(),
+    })
         .passthrough()
         .optional(),
+    topic_id: z
+        .object({
+        '@type': z.string(),
+        forum_topic_id: z.union([z.number(), z.string()]).optional(),
+        message_thread_id: z.union([z.number(), z.string()]).optional(),
+        direct_messages_chat_topic_id: z.union([z.number(), z.string()]).optional(),
+        saved_messages_topic_id: z.union([z.number(), z.string()]).optional(),
+    })
+        .optional()
+        .nullable(),
     content: z.object({ '@type': z.string() }).passthrough(),
 })
     .passthrough();
-export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map()) {
+// TDLib MessageId.h:27-33,60,74,121-123; telegram-bot-api Client.cpp:17597-17613.
+export function botMessageId(id) {
+    const value = typeof id === 'number' ? id : Number(id);
+    return Number.isSafeInteger(value) && value > 0 && value % 1048576 === 0 && value / 1048576 <= 2147483647
+        ? String(value / 1048576)
+        : undefined;
+}
+export function sendTopic(threadId) {
+    if (threadId === undefined)
+        return null;
+    const match = /^(forum|thread|direct|saved):([1-9]\d*)$/.exec(threadId);
+    const value = Number(match?.[2]);
+    if (!match || !Number.isSafeInteger(value) || (match[1] === 'forum' && value > 2147483647))
+        throw new Error('Invalid Telegram thread identifier');
+    switch (match[1]) {
+        case 'forum':
+            return { '@type': 'messageTopicForum', forum_topic_id: value };
+        case 'thread':
+            return { '@type': 'messageTopicThread', message_thread_id: value };
+        case 'direct':
+            return { '@type': 'messageTopicDirectMessages', direct_messages_chat_topic_id: value };
+        case 'saved':
+            return { '@type': 'messageTopicSavedMessages', saved_messages_topic_id: value };
+        default:
+            throw new Error('Invalid Telegram thread identifier');
+    }
+}
+export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map(), userIsBot) {
     const result = Message.safeParse(raw);
     if (!result.success)
         return undefined;
@@ -137,20 +179,63 @@ export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map()
         default:
             break;
     }
-    const senderId = message.sender_id['@type'] === 'messageSenderUser' ? message.sender_id.user_id : message.sender_id.chat_id;
-    if (senderId === undefined)
+    const sender = message.sender_id['@type'] === 'messageSenderUser' &&
+        message.sender_id.user_id !== undefined &&
+        userIsBot !== undefined
+        ? { kind: 'user', id: String(message.sender_id.user_id), isBot: userIsBot }
+        : message.sender_id['@type'] === 'messageSenderChat' && message.sender_id.chat_id !== undefined
+            ? { kind: 'chat', id: String(message.sender_id.chat_id) }
+            : undefined;
+    if (!sender)
         return undefined;
+    const topic = message.topic_id;
+    const topicValue = topic?.['@type'] === 'messageTopicForum'
+        ? topic.forum_topic_id
+        : topic?.['@type'] === 'messageTopicThread'
+            ? topic.message_thread_id
+            : topic?.['@type'] === 'messageTopicDirectMessages'
+                ? topic.direct_messages_chat_topic_id
+                : topic?.['@type'] === 'messageTopicSavedMessages'
+                    ? topic.saved_messages_topic_id
+                    : undefined;
+    const topicPrefix = topic?.['@type'] === 'messageTopicForum'
+        ? 'forum'
+        : topic?.['@type'] === 'messageTopicThread'
+            ? 'thread'
+            : topic?.['@type'] === 'messageTopicDirectMessages'
+                ? 'direct'
+                : topic?.['@type'] === 'messageTopicSavedMessages'
+                    ? 'saved'
+                    : undefined;
+    if (topic && (!topicPrefix || topicValue === undefined))
+        return undefined;
+    const reply = message.reply_to;
+    const sharedReply = reply?.message_id !== undefined &&
+        (reply['@type'] === undefined || reply['@type'] === 'messageReplyToMessage') &&
+        (reply.chat_id === undefined || String(reply.chat_id) === String(message.chat_id)) &&
+        reply.origin == null;
+    const botReply = sharedReply && reply?.message_id !== undefined ? botMessageId(reply.message_id) : undefined;
     return {
         chatId: String(message.chat_id),
         messageId: String(message.id),
-        senderId: String(senderId),
+        senderId: sender.id,
+        sender,
         outgoing: message.is_outgoing,
         text: formatted?.text ?? '',
         dateSeconds: message.date,
         dm: chatType === 'chatTypePrivate' || chatType === 'chatTypeSecret',
         mentionedUserIds: mentions,
         media,
-        ...(message.reply_to?.message_id !== undefined && { replyToMessageId: String(message.reply_to.message_id) }),
+        ...(reply?.message_id !== undefined && { replyToMessageId: String(reply.message_id) }),
+        ...(botMessageId(message.id) && { botMessageId: botMessageId(message.id) }),
+        ...(botReply && { botReplyToMessageId: botReply }),
+        ...(topicPrefix && topicValue !== undefined && { threadId: `${topicPrefix}:${topicValue}` }),
+        ...(topic?.['@type'] === 'messageTopicForum' && topicValue !== 1 && { botThreadId: String(topicValue) }),
+        ...(topic?.['@type'] === 'messageTopicThread' &&
+            topicValue !== undefined &&
+            botMessageId(topicValue) && {
+            botThreadId: botMessageId(topicValue),
+        }),
     };
 }
 //# sourceMappingURL=account-message.js.map

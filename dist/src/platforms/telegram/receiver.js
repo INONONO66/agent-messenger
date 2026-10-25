@@ -6,6 +6,11 @@ const EventSchema = z
     '@extra': z.string().optional(),
 })
     .passthrough();
+export class TdDispatchError extends Error {
+    constructor(cause) {
+        super(cause.message, { cause });
+    }
+}
 export class TdReceiver {
     binding;
     static receivers = new WeakMap();
@@ -72,7 +77,7 @@ export class TdReceiver {
             catch (error) {
                 clearTimeout(timer);
                 requests.delete(extra);
-                reject(error instanceof Error ? error : new Error(String(error)));
+                reject(new TdDispatchError(error instanceof Error ? error : new Error(String(error))));
             }
         });
     }
@@ -110,6 +115,10 @@ export class TdReceiver {
                 for (const pending of requests.values())
                     pending.reject(this.failure);
                 requests.clear();
+            }
+            for (const listeners of this.clients.values()) {
+                for (const listener of listeners)
+                    listener({ '@type': 'receiverFailure' });
             }
         }
         finally {

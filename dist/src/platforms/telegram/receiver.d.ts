@@ -10,6 +10,9 @@ export interface TdBinding {
     send(clientId: number, query: Record<string, unknown>): void;
     receive(timeoutSeconds: number): Promise<unknown> | unknown;
 }
+export declare class TdDispatchError extends Error {
+    constructor(cause: Error);
+}
 export declare class TdReceiver {
     private readonly binding;
     private static readonly receivers;
