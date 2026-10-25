@@ -166,6 +166,8 @@ class AccountClient implements TelegramAccountClient {
       }
       throw error
     }
+    // close() may end the account while start() awaits its directories or the binding; no native client follows.
+    if (this.terminal) throw new TelegramAccountError('Account is closed', 'session_lost')
     this.receiver = TdReceiver.for(this.binding)
     this.clientId = this.binding.createClientId()
     this.unsubscribe = this.receiver.on(this.clientId, (event) => this.onEvent(event))

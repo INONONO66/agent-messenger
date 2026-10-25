@@ -332,6 +332,41 @@ describe('account authorization', () => {
     await expect(client.close()).rejects.toMatchObject({ code: 'unknown' })
   })
 
+  it('creates no TDLib client when close lands while start prepares its directories', async () => {
+    const { client, fake, input } = await fixture()
+    authorize(fake)
+    const created = spyOn(fake, 'createClientId')
+    const starting = client.start(input)
+    await client.close()
+    await expect(starting).rejects.toMatchObject({ code: 'session_lost' })
+    expect(created).not.toHaveBeenCalled()
+    expect(fake.sent).toEqual([])
+  })
+
+  it('creates no TDLib client when close lands while the binding loads', async () => {
+    const { fake, input } = await fixture()
+    authorize(fake)
+    const created = spyOn(fake, 'createClientId')
+    const requested = Promise.withResolvers<void>()
+    const loaded = Promise.withResolvers<TdjsonBinding>()
+    const tdjson = spyOn(TdjsonBinding, 'create').mockImplementation(() => {
+      requested.resolve()
+      return loaded.promise
+    })
+    try {
+      const client = createAccountClient()
+      const starting = client.start(input)
+      await requested.promise
+      await client.close()
+      loaded.resolve(fake as unknown as TdjsonBinding)
+      await expect(starting).rejects.toMatchObject({ code: 'session_lost' })
+    } finally {
+      tdjson.mockRestore()
+    }
+    expect(created).not.toHaveBeenCalled()
+    expect(fake.sent).toEqual([])
+  })
+
   it('settles a pre-start close exactly once', async () => {
     const client = createAccountClient(new FakeTdjson())
     const states = observe(client)
