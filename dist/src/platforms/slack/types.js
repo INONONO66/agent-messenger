@@ -2,6 +2,30 @@
  * Core type definitions for agent-slack
  */
 import { z } from 'zod';
+export const SlackHuddleChangedSchema = z.object({
+    type: z.literal('user_huddle_changed'),
+    user: z.object({
+        id: z.string().min(1),
+        team_id: z.string().min(1),
+        profile: z.object({
+            huddle_state: z.string(),
+            huddle_state_call_id: z.string().min(1).nullable().optional(),
+            huddle_state_expiration_ts: z.number().finite().optional(),
+        }),
+    }),
+    event_ts: z.string().regex(/^\d+\.\d+$/),
+});
+export const SlackHuddleRoomJoinedSchema = z.object({
+    type: z.literal('sh_room_join'),
+    user: z.string().min(1),
+    room: z.object({
+        id: z.string().min(1),
+        has_ended: z.boolean(),
+        participants: z.array(z.string().min(1)).readonly(),
+    }),
+    huddle: z.object({ channel_id: z.string().min(1) }),
+    event_ts: z.string().regex(/^\d+\.\d+$/),
+});
 // Zod validation schemas
 export const SlackChannelSchema = z.object({
     id: z.string(),

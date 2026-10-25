@@ -4,9 +4,13 @@ export declare class SlackError extends Error {
     constructor(message: string, code: string);
 }
 export declare class SlackClient {
+    private readonly options;
     private client;
     private token;
     private cookie;
+    constructor(options?: {
+        readonly retries?: number;
+    });
     login(credentials?: {
         token: string;
         cookie: string;

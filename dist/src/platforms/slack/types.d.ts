@@ -269,8 +269,38 @@ export interface SlackRTMGenericEvent {
     type: string;
     [key: string]: unknown;
 }
+export declare const SlackHuddleChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"user_huddle_changed">;
+    user: z.ZodObject<{
+        id: z.ZodString;
+        team_id: z.ZodString;
+        profile: z.ZodObject<{
+            huddle_state: z.ZodString;
+            huddle_state_call_id: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            huddle_state_expiration_ts: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>;
+    }, z.core.$strip>;
+    event_ts: z.ZodString;
+}, z.core.$strip>;
+export declare const SlackHuddleRoomJoinedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"sh_room_join">;
+    user: z.ZodString;
+    room: z.ZodObject<{
+        id: z.ZodString;
+        has_ended: z.ZodBoolean;
+        participants: z.ZodReadonly<z.ZodArray<z.ZodString>>;
+    }, z.core.$strip>;
+    huddle: z.ZodObject<{
+        channel_id: z.ZodString;
+    }, z.core.$strip>;
+    event_ts: z.ZodString;
+}, z.core.$strip>;
+export type SlackHuddleChanged = z.infer<typeof SlackHuddleChangedSchema>;
+export type SlackHuddleRoomJoined = z.infer<typeof SlackHuddleRoomJoinedSchema>;
 export type SlackRTMEvent = SlackRTMMessageEvent | SlackRTMReactionEvent | SlackRTMMemberEvent | SlackRTMChannelEvent | SlackRTMPresenceEvent | SlackRTMUserTypingEvent | SlackRTMGenericEvent;
 export interface SlackListenerEventMap {
+    user_huddle_changed: [event: SlackHuddleChanged];
+    sh_room_join: [event: SlackHuddleRoomJoined];
     message: [event: SlackRTMMessageEvent];
     reaction_added: [event: SlackRTMReactionEvent];
     reaction_removed: [event: SlackRTMReactionEvent];

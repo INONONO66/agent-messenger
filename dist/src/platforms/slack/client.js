@@ -11,9 +11,13 @@ export class SlackError extends Error {
 const MAX_RETRIES = 3;
 const RATE_LIMIT_ERROR_CODE = 'slack_webapi_rate_limited_error';
 export class SlackClient {
+    options;
     client = null;
     token = null;
     cookie = null;
+    constructor(options = {}) {
+        this.options = options;
+    }
     async login(credentials) {
         if (credentials) {
             if (!credentials.token) {
@@ -26,6 +30,12 @@ export class SlackClient {
             this.cookie = credentials.cookie;
             this.client = new WebClient(credentials.token, {
                 headers: { Cookie: `d=${credentials.cookie}` },
+                ...(this.options.retries === undefined
+                    ? {}
+                    : {
+                        retryConfig: { retries: this.options.retries },
+                        rejectRateLimitedCalls: true,
+                    }),
             });
             return this;
         }
@@ -47,13 +57,14 @@ export class SlackClient {
     }
     async withRetry(operation) {
         let lastError;
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const retries = this.options.retries ?? MAX_RETRIES;
+        for (let attempt = 0; attempt <= retries; attempt++) {
             try {
                 return await operation();
             }
             catch (error) {
                 lastError = error;
-                if (error.code === RATE_LIMIT_ERROR_CODE && attempt < MAX_RETRIES) {
+                if (error.code === RATE_LIMIT_ERROR_CODE && attempt < retries) {
                     const retryAfter = error.retryAfter || 1;
                     await this.sleep(retryAfter * 1000 * (attempt + 1));
                     continue;

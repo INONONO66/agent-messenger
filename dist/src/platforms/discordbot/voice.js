@@ -1,5 +1,6 @@
 import { PassThrough } from 'node:stream';
 import { z } from 'zod';
+import { EventQueue } from '../../shared/event-queue.js';
 const VoicePayload = z.object({
     op: z.literal(4),
     d: z.object({
@@ -15,46 +16,6 @@ export class DiscordVoiceError extends Error {
         super(code, { cause });
         this.code = code;
         this.name = 'DiscordVoiceError';
-    }
-}
-class EventQueue {
-    values = [];
-    pending = null;
-    closed = false;
-    push(value) {
-        if (this.closed)
-            return;
-        if (this.pending) {
-            const resolve = this.pending;
-            this.pending = null;
-            resolve({ value, done: false });
-        }
-        else {
-            this.values.push(value);
-        }
-    }
-    end() {
-        this.closed = true;
-        this.pending?.({ value: undefined, done: true });
-        this.pending = null;
-    }
-    async *[Symbol.asyncIterator]() {
-        while (true) {
-            if (this.values.length) {
-                yield this.values.shift();
-            }
-            else if (this.closed) {
-                return;
-            }
-            else {
-                const next = await new Promise((resolve) => {
-                    this.pending = resolve;
-                });
-                if (next.done)
-                    return;
-                yield next.value;
-            }
-        }
     }
 }
 export function voiceAdapter(listener, guildId, botUserId) {
