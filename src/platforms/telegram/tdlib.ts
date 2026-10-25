@@ -3,7 +3,9 @@ import { TelegramError } from './types'
 interface TdjsonSymbols {
   td_create_client_id: () => number
   td_send: (clientId: number, request: string) => void
-  td_receive: (timeout: number) => string | null
+  td_receive: ((timeout: number) => string | null) & {
+    async: (timeout: number, callback: (error: Error | null, result: string | null) => void) => void
+  }
   td_execute: (request: string) => string | null
 }
 
@@ -12,6 +14,7 @@ function unwrapDefaultExport<T>(moduleNamespace: T): T {
 }
 
 let cachedKoffi: typeof import('koffi') | undefined
+let sharedBinding: Promise<TdjsonBinding> | undefined
 
 async function getKoffi(): Promise<typeof import('koffi')> {
   if (cachedKoffi) {
@@ -131,8 +134,13 @@ export class TdjsonBinding {
   }
 
   static async create(tdlibPath?: string): Promise<TdjsonBinding> {
-    const loaded = await loadTdjson(tdlibPath)
-    return new TdjsonBinding(loaded.libraryPath, loaded.symbols)
+    sharedBinding ??= loadTdjson(tdlibPath).then((loaded) => new TdjsonBinding(loaded.libraryPath, loaded.symbols))
+    try {
+      return await sharedBinding
+    } catch (error) {
+      sharedBinding = undefined
+      throw error
+    }
   }
 
   createClientId(): number {
@@ -143,13 +151,31 @@ export class TdjsonBinding {
     this.symbols.td_send(clientId, JSON.stringify(query))
   }
 
-  receive(timeoutSeconds: number): any | null {
-    const result = this.symbols.td_receive(timeoutSeconds)
+  async receive(timeoutSeconds: number): Promise<unknown> {
+    const result = await new Promise<string | null>((resolve, reject) => {
+      this.symbols.td_receive.async(timeoutSeconds, (error, value) => {
+        if (error) reject(error)
+        else resolve(value)
+      })
+    })
     if (!result || !result.trim()) {
       return null
     }
 
-    return JSON.parse(result)
+    return JSON.parse(result, function (key: string, value: unknown) {
+      const context: unknown = arguments[2]
+      if (
+        typeof value === 'number' &&
+        !Number.isSafeInteger(value) &&
+        /^(id|chat_id|message_id|old_message_id|user_id)$/.test(key) &&
+        typeof context === 'object' &&
+        context !== null &&
+        'source' in context &&
+        typeof context.source === 'string'
+      )
+        return context.source
+      return value
+    })
   }
 
   execute(query: unknown): any | null {
