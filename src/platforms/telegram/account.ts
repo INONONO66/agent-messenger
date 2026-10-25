@@ -1,19 +1,21 @@
 import { createReadStream } from 'node:fs'
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import { z } from 'zod'
 
-import { parseAccountMessage } from './account-message'
+import { botMessageId, parseAccountMessage, sendTopic } from './account-message'
 import {
   TelegramAccountError,
   type TelegramAccountClient,
   type TelegramAccountErrorCode,
   type TelegramAccountMessage,
+  type TelegramAccountState,
   type TelegramHistoryPage,
   type TelegramLoginAction,
   type TelegramSendContent,
 } from './account-types'
-import { TdReceiver, type TdBinding, type TdEvent } from './receiver'
+import { TdDispatchError, TdReceiver, type TdBinding, type TdEvent } from './receiver'
 import { TdjsonBinding } from './tdlib'
 import { TelegramError } from './types'
 
@@ -69,8 +71,18 @@ class AccountClient implements TelegramAccountClient {
   private readonly chats = new Map<string, string>()
   private readonly media = new Map<number, TelegramAccountMessage['media'][number]>()
   private readonly handlers = new Set<(message: TelegramAccountMessage) => void>()
+  private readonly stateHandlers = new Set<(state: TelegramAccountState) => void>()
+  private readonly users = new Map<string, boolean>()
+  private filesDir?: string
+  private ready = false
+  private lastState?: string
+  private closing = false
+  private terminal = false
   private readonly sent = new Map<string, TdEvent>()
-  private readonly sentWaiters = new Map<string, (event: TdEvent) => void>()
+  private readonly sentWaiters = new Map<
+    string,
+    { resolve: (event: TdEvent) => void; reject: (error: Error) => void }
+  >()
 
   constructor(
     private readonly suppliedBinding?: TdBinding,
@@ -96,7 +108,39 @@ class AccountClient implements TelegramAccountClient {
     switch (event['@type']) {
       case 'updateAuthorizationState': {
         const parsed = Authorization.safeParse(event.authorization_state)
-        if (parsed.success) this.authorization = parsed.data['@type']
+        if (parsed.success) {
+          this.authorization = parsed.data['@type']
+          if (
+            this.authorization === 'authorizationStateClosed' ||
+            this.authorization === 'authorizationStateClosing' ||
+            this.authorization === 'authorizationStateLoggingOut'
+          )
+            this.end(this.closing ? 'closed' : 'session_lost')
+          else if (this.authorization === 'authorizationStateReady' && !this.ready)
+            void this.status().catch(() => this.end('session_lost'))
+          else if (this.authorization !== 'authorizationStateReady') {
+            try {
+              const action = loginAction(this.authorization)
+              if (action !== 'ready') {
+                if (this.ready) this.handlers.clear()
+                this.ready = false
+                this.emitState({ state: 'login_action_required', action })
+              }
+            } catch (error) {
+              if (error instanceof TelegramAccountError) this.end('session_lost')
+              else throw error
+            }
+          }
+        }
+        break
+      }
+      case 'receiverFailure':
+        this.end('session_lost')
+        break
+      case 'updateUser': {
+        const user = z.object({ id: Id, type: Authorization }).safeParse(event.user)
+        if (user.success && user.data.type['@type'] !== 'userTypeUnknown')
+          this.users.set(String(user.data.id), user.data.type['@type'] === 'userTypeBot')
         break
       }
       case 'updateNewChat': {
@@ -107,7 +151,7 @@ class AccountClient implements TelegramAccountClient {
       case 'updateNewMessage': {
         const chatId = z.object({ chat_id: Id }).safeParse(event.message)
         if (!chatId.success) break
-        void this.publishMessage(event.message, String(chatId.data.chat_id))
+        void this.publishMessage(event.message, String(chatId.data.chat_id)).catch(() => this.end('session_lost'))
         break
       }
       case 'updateMessageSendSucceeded':
@@ -118,8 +162,21 @@ class AccountClient implements TelegramAccountClient {
         const waiter = this.sentWaiters.get(key)
         if (waiter) {
           this.sentWaiters.delete(key)
-          waiter(event)
+          waiter.resolve(event)
         } else this.sent.set(key, event)
+        break
+      }
+      case 'updateDeleteMessages': {
+        const deleted = z.object({ message_ids: z.array(Id) }).safeParse(event)
+        if (!deleted.success) break
+        for (const id of deleted.data.message_ids) {
+          const key = String(id)
+          const waiter = this.sentWaiters.get(key)
+          if (waiter) {
+            this.sentWaiters.delete(key)
+            waiter.reject(new TelegramAccountError('Temporary message deleted before confirmation', 'unknown'))
+          } else this.sent.set(key, event)
+        }
         break
       }
       default:
@@ -127,10 +184,45 @@ class AccountClient implements TelegramAccountClient {
     }
   }
 
+  private emitState(state: TelegramAccountState): void {
+    const key = JSON.stringify(state)
+    if (key === this.lastState) return
+    this.lastState = key
+    for (const handler of this.stateHandlers) handler(state)
+  }
+
+  private end(reason: 'session_lost' | 'closed'): void {
+    if (this.terminal) return
+    this.terminal = true
+    this.handlers.clear()
+    for (const waiter of this.sentWaiters.values())
+      waiter.reject(new TelegramAccountError('Account closed before send confirmation', 'unknown'))
+    this.sentWaiters.clear()
+    this.emitState({ state: 'closed', reason })
+  }
+
+  private async senderBot(raw: unknown): Promise<boolean | undefined> {
+    const sender = z.object({ sender_id: z.object({ '@type': z.string(), user_id: Id.optional() }) }).safeParse(raw)
+    if (!sender.success || sender.data.sender_id['@type'] !== 'messageSenderUser') return undefined
+    const id = sender.data.sender_id.user_id
+    if (id === undefined) return undefined
+    const cached = this.users.get(String(id))
+    if (cached !== undefined) return cached
+    const user = z
+      .object({ type: Authorization })
+      .safeParse(await this.call({ '@type': 'getUser', user_id: id }, 'session_lost'))
+    if (!user.success) throw new TelegramAccountError('Sender user type unavailable', 'session_lost')
+    const kind = user.data.type['@type']
+    if (kind === 'userTypeUnknown') throw new TelegramAccountError('Sender user type unavailable', 'session_lost')
+    const isBot = kind === 'userTypeBot'
+    this.users.set(String(id), isBot)
+    return isBot
+  }
+
   private async publishMessage(raw: unknown, chatId: string): Promise<void> {
     const chatType = await this.chatType(chatId)
-    const message = parseAccountMessage(raw, chatType, await this.resolveMentions(raw))
-    if (message) {
+    const message = parseAccountMessage(raw, chatType, await this.resolveMentions(raw), await this.senderBot(raw))
+    if (message && this.ready && !this.terminal) {
       for (const item of message.media) this.media.set(item.fileId, item)
       for (const handler of this.handlers) handler(message)
     }
@@ -195,10 +287,11 @@ class AccountClient implements TelegramAccountClient {
       throw new TelegramAccountError('Client is not started', 'session_lost')
     try {
       const event = await this.receiver.request(this.clientId, query)
-      if (event['@type'] === 'error') throw failure(event, code)
+      if (event['@type'] === 'error') throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code)
       return event
     } catch (error) {
       if (error instanceof TelegramAccountError) throw error
+      if (error instanceof TdDispatchError && query['@type'] === 'sendMessage') throw error
       throw new TelegramAccountError(error instanceof Error ? error.message : String(error), code)
     }
   }
@@ -234,8 +327,14 @@ class AccountClient implements TelegramAccountClient {
     const state = this.authorization
     if (!state) throw new TelegramAccountError('No authorization state', 'session_lost')
     const action = loginAction(state)
-    if (action !== 'ready') return { state: action }
+    if (action !== 'ready') {
+      this.emitState({ state: 'login_action_required', action })
+      return { state: action }
+    }
     const me = z.object({ id: Id }).parse(await this.call({ '@type': 'getMe' }, 'session_lost'))
+    if (this.terminal) throw new TelegramAccountError('Account closed before ready', 'session_lost')
+    this.ready = true
+    this.emitState({ state: 'ready', userId: String(me.id) })
     return { state: 'ready', userId: String(me.id) }
   }
 
@@ -245,8 +344,10 @@ class AccountClient implements TelegramAccountClient {
     readonly databaseDir: string
     readonly filesDir: string
   }) {
+    if (this.terminal) throw new TelegramAccountError('Account is closed', 'session_lost')
     await mkdir(input.databaseDir, { recursive: true, mode: 0o700 })
     await mkdir(input.filesDir, { recursive: true, mode: 0o700 })
+    this.filesDir = input.filesDir
     await this.open()
     const state = await this.call({ '@type': 'getAuthorizationState' }, 'session_lost')
     this.authorization = Authorization.parse(state)['@type']
@@ -330,10 +431,18 @@ class AccountClient implements TelegramAccountClient {
     return () => this.handlers.delete(handler)
   }
 
+  onState(handler: (state: TelegramAccountState) => void): () => void {
+    this.stateHandlers.add(handler)
+    return () => {
+      this.stateHandlers.delete(handler)
+    }
+  }
+
   async history(
     chatId: string,
     options: { readonly before?: string; readonly limit: number },
   ): Promise<TelegramHistoryPage> {
+    if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'session_lost')
     const cursor = options.before === undefined ? 0 : Number(options.before) - 1
     if (
       options.before !== undefined &&
@@ -355,7 +464,7 @@ class AccountClient implements TelegramAccountClient {
     const chatType = await this.chatType(chatId)
     const messages: TelegramAccountMessage[] = []
     for (const raw of page.messages) {
-      const parsed = parseAccountMessage(raw, chatType, await this.resolveMentions(raw))
+      const parsed = parseAccountMessage(raw, chatType, await this.resolveMentions(raw), await this.senderBot(raw))
       if (!parsed) throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable')
       messages.push(parsed)
       for (const item of parsed.media) this.media.set(item.fileId, item)
@@ -365,6 +474,7 @@ class AccountClient implements TelegramAccountClient {
   }
 
   async download(fileId: number, options: { readonly signal: AbortSignal }) {
+    if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'session_lost')
     if (options.signal.aborted) throw new TelegramAccountError('Download aborted', 'download_failed')
     const completed = this.waitUpdate((event) => {
       if (event['@type'] !== 'updateFile') return false
@@ -424,14 +534,51 @@ class AccountClient implements TelegramAccountClient {
     }
   }
 
-  async send(chatId: string, content: TelegramSendContent): Promise<{ readonly messageId: string }> {
+  async send(
+    chatId: string,
+    content: TelegramSendContent,
+  ): Promise<{ readonly messageId: string; readonly botMessageId?: string }> {
+    if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'not_sent')
+    let topic_id: ReturnType<typeof sendTopic>
+    try {
+      topic_id = sendTopic(content.threadId)
+    } catch {
+      throw new TelegramAccountError('Invalid Telegram thread identifier', 'not_sent')
+    }
+    const bytes = 'bytes' in content ? content.bytes : undefined
+    if (bytes && bytes.byteLength > 50 * 1024 * 1024)
+      throw new TelegramAccountError('Outbound file exceeds byte limit', 'media_too_large')
+    if (bytes && !this.filesDir) throw new TelegramAccountError('Client is not started', 'not_sent')
+    let stage: string | undefined
+    try {
+      if (bytes) stage = await mkdtemp(join(this.filesDir ?? '', 'outbound-'))
+      if (stage && bytes) await writeFile(join(stage, 'upload'), bytes, { flag: 'wx', mode: 0o600 })
+      return await this.sendPrepared(chatId, content, topic_id, stage ? join(stage, 'upload') : undefined)
+    } catch (error) {
+      if (error instanceof TelegramAccountError) throw error
+      throw new TelegramAccountError(error instanceof Error ? error.message : String(error), 'not_sent')
+    } finally {
+      if (stage) await rm(stage, { recursive: true, force: true })
+    }
+  }
+
+  private async sendPrepared(
+    chatId: string,
+    content: TelegramSendContent,
+    topic_id: ReturnType<typeof sendTopic>,
+    stagedPath?: string,
+  ): Promise<{ readonly messageId: string; readonly botMessageId?: string }> {
+    if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'not_sent')
     const reply_to = content.replyTo ? { '@type': 'inputMessageReplyToMessage', message_id: content.replyTo } : null
     const caption = {
       '@type': 'formattedText',
       text: content.kind === 'text' ? content.text : (content.caption ?? ''),
       entities: [],
     }
-    const file = content.kind === 'text' ? undefined : { '@type': 'inputFileLocal', path: content.path }
+    const file =
+      content.kind === 'text'
+        ? undefined
+        : { '@type': 'inputFileLocal', path: stagedPath ?? ('path' in content ? content.path : '') }
     const input_message_content: Record<string, unknown> = (() => {
       switch (content.kind) {
         case 'text':
@@ -448,12 +595,20 @@ class AccountClient implements TelegramAccountClient {
           return { '@type': 'inputMessageDocument', document: file, caption }
       }
     })()
-    const reply = await this.call(
-      { '@type': 'sendMessage', chat_id: chatId, reply_to, input_message_content },
-      'not_sent',
-    )
+    let reply: TdEvent
+    try {
+      reply = await this.call(
+        { '@type': 'sendMessage', chat_id: chatId, reply_to, topic_id, input_message_content },
+        'unknown',
+      )
+    } catch (error) {
+      if (error instanceof TdDispatchError) throw new TelegramAccountError(error.message, 'not_sent')
+      if (error instanceof TelegramAccountError && error.code === 'not_sent') throw error
+      throw error
+    }
     const pending = z.object({ id: Id }).safeParse(reply)
     if (!pending.success) throw new TelegramAccountError('Missing temporary send id', 'unknown')
+    if (this.terminal) throw new TelegramAccountError('Account closed before send confirmation', 'unknown')
     const key = String(pending.data.id)
     const confirmation =
       this.sent.get(key) ??
@@ -462,20 +617,43 @@ class AccountClient implements TelegramAccountClient {
           this.sentWaiters.delete(key)
           reject(new TelegramAccountError('Send confirmation timed out', 'unknown'))
         }, 10000)
-        this.sentWaiters.set(key, (event) => {
-          clearTimeout(timer)
-          resolve(event)
+        this.sentWaiters.set(key, {
+          resolve: (event) => {
+            clearTimeout(timer)
+            resolve(event)
+          },
+          reject: (error) => {
+            clearTimeout(timer)
+            reject(error)
+          },
         })
       }))
     this.sent.delete(key)
-    if (confirmation['@type'] === 'updateMessageSendFailed') throw failure(confirmation, 'unknown')
+    if (confirmation['@type'] === 'updateDeleteMessages')
+      throw new TelegramAccountError('Temporary message deleted before confirmation', 'unknown')
+    if (confirmation['@type'] === 'updateMessageSendFailed') {
+      const error = z.object({ message: z.string(), code: z.number() }).safeParse(confirmation.error)
+      throw new TelegramAccountError(error.success ? error.data.message : 'TDLib send failed', 'not_sent')
+    }
     const message = z.object({ id: Id }).safeParse(confirmation.message)
     if (!message.success) throw new TelegramAccountError('Invalid send confirmation', 'unknown')
-    return { messageId: String(message.data.id) }
+    return {
+      messageId: String(message.data.id),
+      ...(botMessageId(message.data.id) && { botMessageId: botMessageId(message.data.id) }),
+    }
   }
 
   async close(): Promise<void> {
-    if (!this.receiver) return
+    if (!this.receiver) {
+      this.end('closed')
+      return
+    }
+    if (this.terminal) {
+      this.unsubscribe?.()
+      this.receiver = undefined
+      return
+    }
+    this.closing = true
     const closed = this.waitUpdate(
       (event) =>
         event['@type'] === 'updateAuthorizationState' &&
@@ -486,6 +664,7 @@ class AccountClient implements TelegramAccountClient {
       await closed.promise
     } finally {
       closed.cancel()
+      this.end('closed')
       this.unsubscribe?.()
       this.receiver = undefined
     }
