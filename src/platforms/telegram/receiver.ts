@@ -101,37 +101,43 @@ export class TdReceiver {
     void this.pump()
   }
 
+  private wanted(): boolean {
+    return this.clients.size > 0 || [...this.pending.values()].some((requests) => requests.size > 0)
+  }
+
+  private dispatch(raw: Awaited<ReturnType<TdBinding['receive']>>): void {
+    const parsed = EventSchema.safeParse(raw)
+    const event = parsed.data
+    const clientId = event?.['@client_id']
+    if (!event || clientId === undefined) return
+    const extra = event['@extra']
+    const request = extra === undefined ? undefined : this.pending.get(clientId)?.get(extra)
+    if (request && extra !== undefined) {
+      this.pending.get(clientId)?.delete(extra)
+      request.resolve(event)
+    }
+    for (const listener of this.clients.get(clientId) ?? []) listener(event)
+  }
+
+  private fail(failure: Error): void {
+    this.failure = failure
+    for (const requests of this.pending.values()) {
+      for (const pending of requests.values()) pending.reject(this.failure)
+      requests.clear()
+    }
+    for (const listeners of this.clients.values()) {
+      for (const listener of listeners) listener({ '@type': 'receiverFailure' })
+    }
+  }
+
   private async pump(): Promise<void> {
     try {
-      while (this.clients.size > 0 || [...this.pending.values()].some((requests) => requests.size > 0)) {
-        const raw = await this.binding.receive(1)
-        const parsed = EventSchema.safeParse(raw)
-        if (!parsed.success) continue
-        const event = parsed.data
-        const clientId = event['@client_id']
-        if (clientId === undefined) continue
-        if (event['@extra']) {
-          const request = this.pending.get(clientId)?.get(event['@extra'])
-          if (request) {
-            this.pending.get(clientId)?.delete(event['@extra'])
-            request.resolve(event)
-          }
-        }
-        for (const listener of this.clients.get(clientId) ?? []) listener(event)
-      }
+      while (this.wanted()) this.dispatch(await this.binding.receive(1))
     } catch (error) {
-      this.failure = error instanceof Error ? error : new Error(String(error))
-      for (const requests of this.pending.values()) {
-        for (const pending of requests.values()) pending.reject(this.failure)
-        requests.clear()
-      }
-      for (const listeners of this.clients.values()) {
-        for (const listener of listeners) listener({ '@type': 'receiverFailure' })
-      }
+      this.fail(error instanceof Error ? error : new Error(String(error)))
     } finally {
       this.running = false
-      if (!this.failure && (this.clients.size > 0 || [...this.pending.values()].some((requests) => requests.size > 0)))
-        this.start()
+      if (!this.failure && this.wanted()) this.start()
     }
   }
 }

@@ -7,6 +7,7 @@ import { join } from 'node:path'
 
 import { createAccountClient } from './account'
 import { botMessageId, parseAccountMessage } from './account-message'
+import type { TelegramAccountClient } from './account-types'
 import { TdReceiver } from './receiver'
 import { TdjsonBinding } from './tdlib'
 import { TelegramError } from './types'
@@ -70,21 +71,103 @@ afterEach(async () => {
   for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true })
 })
 
-async function started(state = 'authorizationStateReady') {
+type Deadline = (callback: () => void, ms: number) => ReturnType<typeof setTimeout>
+
+async function fixture(deadline?: Deadline) {
   const fake = new FakeTdjson()
   const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
   directories.push(dir)
+  const client = createAccountClient(fake, deadline)
+  const input = { apiId: 42, apiHash: 'hash', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }
+  return { client, fake, dir, input }
+}
+
+function authorize(
+  fake: FakeTdjson,
+  state = 'authorizationStateReady',
+  next: (id: number, request: Event) => void = () => {},
+): void {
   fake.onSend = (id, request) => {
     if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': state })
     if (request['@type'] === 'getMe') {
       fake.emit(id, { '@type': 'updateUser', user: { id: 27, type: { '@type': 'userTypeRegular' } } })
       fake.reply(id, request, { '@type': 'user', id: 27 })
     }
+    next(id, request)
   }
-  const client = createAccountClient(fake)
-  const input = { apiId: 42, apiHash: 'hash', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }
-  const result = await client.start(input)
-  return { client, fake, result, dir, input }
+}
+
+async function started(state = 'authorizationStateReady') {
+  const setup = await fixture()
+  authorize(setup.fake, state)
+  return { ...setup, result: await setup.client.start(setup.input) }
+}
+
+function authState(state: string): Event {
+  return { '@type': 'updateAuthorizationState', authorization_state: { '@type': state } }
+}
+
+function observe(client: TelegramAccountClient): Event[] {
+  const states: Event[] = []
+  client.onState((state) => states.push(state))
+  return states
+}
+
+function untilState(client: TelegramAccountClient, wanted: string): Promise<Event> {
+  return new Promise((resolve) =>
+    client.onState((state) => {
+      if (state.state === wanted) resolve(state)
+    }),
+  )
+}
+
+function answerClose(fake: FakeTdjson, response: Event = { '@type': 'ok' }): void {
+  const previous = fake.onSend
+  fake.onSend = (id, request) => {
+    if (request['@type'] !== 'close') return previous(id, request)
+    if (response['@type'] === 'ok') fake.emit(id, authState('authorizationStateClosed'))
+    fake.reply(id, request, response)
+  }
+}
+
+function closeRequests(fake: FakeTdjson) {
+  return fake.sent.filter(({ request }) => request['@type'] === 'close')
+}
+
+function armedDeadline() {
+  let fire: (() => void) | undefined
+  let armed: (() => void) | undefined
+  const ready = new Promise<void>((resolve) => {
+    armed = resolve
+  })
+  const deadline: Deadline = (callback) => {
+    fire = callback
+    armed?.()
+    return inertDeadline()
+  }
+  return { deadline, ready, fire: () => fire?.() }
+}
+
+// A ready client whose sends receive `temporary` and wait for a confirmation; the deadline arms at the wait.
+async function awaitingConfirmation(temporary: number) {
+  const timer = armedDeadline()
+  const setup = await fixture(timer.deadline)
+  authorize(setup.fake, 'authorizationStateReady', (id, request) => {
+    if (request['@type'] === 'sendMessage') setup.fake.reply(id, request, { '@type': 'message', id: temporary })
+  })
+  answerClose(setup.fake)
+  await setup.client.start(setup.input)
+  return { ...setup, timer }
+}
+
+function emitFromUser(fake: FakeTdjson, userId: number, text: string): void {
+  fake.emit(1, {
+    '@type': 'updateNewMessage',
+    message: {
+      ...message({ '@type': 'messageText', text: { text, entities: [] } }),
+      sender_id: { '@type': 'messageSenderUser', user_id: userId },
+    },
+  })
 }
 
 function message(content: Event, id = 20): Event {
@@ -153,55 +236,33 @@ describe('TDJSON receive ownership', () => {
 
 describe('account authorization', () => {
   it.each([
-    ['authorizationStateWaitPhoneNumber', 'phone'],
-    ['authorizationStateWaitCode', 'code'],
-    ['authorizationStateWaitPassword', 'password'],
-    ['authorizationStateWaitEmailAddress', 'email'],
-    ['authorizationStateWaitEmailCode', 'email_code'],
-  ])('notifies a pre-start state subscriber of %s', async (authorization, action) => {
-    const fake = new FakeTdjson()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': authorization })
-    }
-    const client = createAccountClient(fake)
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
-    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
-    expect(states).toEqual([{ state: 'login_action_required', action }])
+    ['authorizationStateWaitPhoneNumber', { state: 'login_action_required', action: 'phone' }],
+    ['authorizationStateWaitCode', { state: 'login_action_required', action: 'code' }],
+    ['authorizationStateWaitPassword', { state: 'login_action_required', action: 'password' }],
+    ['authorizationStateWaitEmailAddress', { state: 'login_action_required', action: 'email' }],
+    ['authorizationStateWaitEmailCode', { state: 'login_action_required', action: 'email_code' }],
+    ['authorizationStateReady', { state: 'ready', userId: '27' }],
+  ])('notifies a pre-start state subscriber of %s', async (authorization, expected) => {
+    const { client, fake, input } = await fixture()
+    authorize(fake, authorization)
+    const states = observe(client)
+    await client.start(input)
+    expect(states).toEqual([expected])
   })
 
   it('observes sign-in before start, ready, revocation and one terminal closure', async () => {
-    const fake = new FakeTdjson()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState')
-        fake.reply(id, request, { '@type': 'authorizationStateWaitPhoneNumber' })
-      if (request['@type'] === 'setAuthenticationPhoneNumber') {
-        fake.emit(id, {
-          '@type': 'updateAuthorizationState',
-          authorization_state: { '@type': 'authorizationStateReady' },
-        })
-        fake.reply(id, request, { '@type': 'ok' })
-      }
-      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
-    }
-    const client = createAccountClient(fake)
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
-    const input = { apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }
+    const { client, fake, input } = await fixture()
+    authorize(fake, 'authorizationStateWaitPhoneNumber', (id, request) => {
+      if (request['@type'] !== 'setAuthenticationPhoneNumber') return
+      fake.emit(id, authState('authorizationStateReady'))
+      fake.reply(id, request, { '@type': 'ok' })
+    })
+    const states = observe(client)
     expect(await client.start(input)).toMatchObject({ state: 'phone' })
     expect(await client.authenticate({ phone: '+123' })).toMatchObject({ state: 'ready', userId: '27' })
-    const lost = new Promise<void>((resolve) =>
-      client.onState((state) => {
-        if (state.state === 'closed') resolve()
-      }),
-    )
-    fake.emit(1, { '@type': 'updateAuthorizationState', authorization_state: { '@type': 'authorizationStateClosing' } })
+    const lost = untilState(client, 'closed')
+    fake.emit(1, authState('authorizationStateClosing'))
     await lost
-    fake.emit(1, { '@type': 'updateAuthorizationState', authorization_state: { '@type': 'authorizationStateClosed' } })
     expect(states).toEqual([
       { state: 'login_action_required', action: 'phone' },
       { state: 'ready', userId: '27' },
@@ -209,62 +270,57 @@ describe('account authorization', () => {
     ])
     await expect(client.history('33', { limit: 1 })).rejects.toMatchObject({ code: 'session_lost' })
     await expect(client.send('33', { kind: 'text', text: 'x' })).rejects.toMatchObject({ code: 'not_sent' })
+    const closing = client.close()
+    fake.emit(1, authState('authorizationStateClosed'))
+    await closing
+    expect(closeRequests(fake)).toHaveLength(0)
   })
 
   it('emits one explicit close and no session lost state', async () => {
     const { client, fake } = await started()
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'close') {
-        fake.emit(id, {
-          '@type': 'updateAuthorizationState',
-          authorization_state: { '@type': 'authorizationStateClosed' },
-        })
-        fake.reply(id, request, { '@type': 'ok' })
-      }
-    }
+    const states = observe(client)
+    answerClose(fake)
     await client.close()
     await client.close()
     expect(states).toEqual([{ state: 'closed', reason: 'closed' }])
-    expect(fake.sent.filter(({ request }) => request['@type'] === 'close')).toHaveLength(1)
+    expect(closeRequests(fake)).toHaveLength(1)
   })
 
-  it('settles one closed state even if TDLib refuses the close request', async () => {
+  it('settles one closed state and keeps reporting a refused native close as unconfirmed', async () => {
     const { client, fake } = await started()
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'close')
-        fake.reply(id, request, { '@type': 'error', code: 500, message: 'close refused' })
-    }
+    const states = observe(client)
+    answerClose(fake, { '@type': 'error', code: 500, message: 'close refused' })
     await expect(client.close()).rejects.toMatchObject({ code: 'unknown' })
-    await client.close()
+    await expect(client.close()).rejects.toMatchObject({ code: 'unknown' })
     expect(states).toEqual([{ state: 'closed', reason: 'closed' }])
+    expect(closeRequests(fake)).toHaveLength(1)
+  })
+
+  it('closes TDLib natively once after a logical session loss', async () => {
+    const { client, fake } = await started()
+    answerClose(fake)
+    const lost = untilState(client, 'closed')
+    fake.emit(1, { '@type': 'receiverFailure' })
+    expect(await lost).toEqual({ state: 'closed', reason: 'session_lost' })
+    await client.close()
+    await client.close()
+    expect(closeRequests(fake)).toHaveLength(1)
+  })
+
+  it('reports native closure as unconfirmed when the receiver has failed', async () => {
+    const { client, fake } = await started()
+    const lost = untilState(client, 'closed')
+    fake.failReceive(new Error('receive lost'))
+    await lost
+    await expect(client.close()).rejects.toMatchObject({ code: 'unknown' })
   })
 
   it('settles a pre-start close exactly once', async () => {
     const client = createAccountClient(new FakeTdjson())
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
+    const states = observe(client)
     await client.close()
     await client.close()
     expect(states).toEqual([{ state: 'closed', reason: 'closed' }])
-  })
-
-  it('reports verified ready identity to a subscriber registered before start', async () => {
-    const fake = new FakeTdjson()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': 'authorizationStateReady' })
-      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
-    }
-    const client = createAccountClient(fake)
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
-    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
-    expect(states).toEqual([{ state: 'ready', userId: '27' }])
   })
 
   it('removes a state subscription without affecting other observers', async () => {
@@ -279,20 +335,19 @@ describe('account authorization', () => {
 
   it('withdraws mounted operations when authorization asks for another login action', async () => {
     const { client, fake } = await started()
-    const states: Event[] = []
-    client.onState((state) => states.push(state))
-    const requested = new Promise<void>((resolve) =>
-      client.onState((state) => {
-        if (state.state === 'login_action_required') resolve()
-      }),
-    )
-    fake.emit(1, {
-      '@type': 'updateAuthorizationState',
-      authorization_state: { '@type': 'authorizationStateWaitPassword' },
-    })
+    const states = observe(client)
+    const requested = untilState(client, 'login_action_required')
+    fake.emit(1, authState('authorizationStateWaitPassword'))
     await requested
     expect(states).toEqual([{ state: 'login_action_required', action: 'password' }])
     await expect(client.history('33', { limit: 1 })).rejects.toMatchObject({ code: 'session_lost' })
+  })
+
+  it('keeps an unsupported authorization state fail-closed', async () => {
+    const { client, fake } = await started()
+    const lost = untilState(client, 'closed')
+    fake.emit(1, authState('authorizationStateWaitPremiumPurchase'))
+    expect(await lost).toEqual({ state: 'closed', reason: 'session_lost' })
   })
 
   it.each([
@@ -313,38 +368,27 @@ describe('account authorization', () => {
     const submitted = client.authenticate({ phone: '+123' })
     const request = fake.sent.at(-1)?.request
     expect(request['@type']).toBe('setAuthenticationPhoneNumber')
-    fake.emit(1, {
-      '@type': 'updateAuthorizationState',
-      authorization_state: { '@type': 'authorizationStateWaitCode' },
-    })
+    fake.emit(1, authState('authorizationStateWaitCode'))
     fake.reply(1, request, { '@type': 'ok' })
     expect((await submitted).state).toBe('code')
     expect(input.apiId).toBe(42)
   })
 
-  it('subscribes before setTdlibParameters and enables the three local databases', async () => {
-    const fake = new FakeTdjson()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState')
-        fake.reply(id, request, { '@type': 'authorizationStateWaitTdlibParameters' })
-      if (request['@type'] === 'setTdlibParameters') {
-        fake.emit(id, {
-          '@type': 'updateAuthorizationState',
-          authorization_state: { '@type': 'authorizationStateWaitPhoneNumber' },
-        })
-        fake.reply(id, request, { '@type': 'ok' })
-      }
-    }
-    const client = createAccountClient(fake)
-    const result = await client.start({
-      apiId: 42,
-      apiHash: 'hash',
-      databaseDir: join(dir, 'db'),
-      filesDir: join(dir, 'files'),
+  // TDLib announces authorizationStateWaitTdlibParameters natively before answering getAuthorizationState.
+  it.each([
+    ['authorizationStateWaitPhoneNumber', { state: 'phone' }, { state: 'login_action_required', action: 'phone' }],
+    ['authorizationStateReady', { state: 'ready', userId: '27' }, { state: 'ready', userId: '27' }],
+  ])('initializes through the native parameters update and reaches %s', async (next, result, state) => {
+    const { client, fake, dir, input } = await fixture()
+    authorize(fake, 'authorizationStateWaitTdlibParameters', (id, request) => {
+      if (request['@type'] !== 'setTdlibParameters') return
+      fake.emit(id, authState(next))
+      fake.reply(id, request, { '@type': 'ok' })
     })
-    expect(result).toEqual({ state: 'phone' })
+    const states = observe(client)
+    fake.emit(1, authState('authorizationStateWaitTdlibParameters'))
+    expect(await client.start(input)).toEqual(result)
+    expect(states).toEqual([state])
     const parameters = fake.sent.find(({ request }) => request['@type'] === 'setTdlibParameters')?.request
     expect([parameters.use_file_database, parameters.use_chat_info_database, parameters.use_message_database]).toEqual([
       true,
@@ -359,14 +403,9 @@ describe('account authorization', () => {
       ['database is locked by another instance', 'session_in_use'],
       ['AUTH_KEY_UNREGISTERED', 'session_lost'],
     ]) {
-      const fake = new FakeTdjson()
-      const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-      directories.push(dir)
+      const { client, fake, input } = await fixture()
       fake.onSend = (id, request) => fake.reply(id, request, { '@type': 'error', message: detail, code: 400 })
-      const client = createAccountClient(fake)
-      await expect(
-        client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }),
-      ).rejects.toMatchObject({ code })
+      await expect(client.start(input)).rejects.toMatchObject({ code })
     }
   })
 
@@ -374,13 +413,9 @@ describe('account authorization', () => {
     const tdjson = spyOn(TdjsonBinding, 'create').mockRejectedValue(
       new TelegramError('native missing', 'tdlib_not_found'),
     )
-    const client = createAccountClient()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
+    const { input } = await fixture()
     try {
-      await expect(
-        client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') }),
-      ).rejects.toMatchObject({ code: 'tdlib_not_found' })
+      await expect(createAccountClient().start(input)).rejects.toMatchObject({ code: 'tdlib_not_found' })
     } finally {
       tdjson.mockRestore()
     }
@@ -391,42 +426,21 @@ describe('account authorization', () => {
     await expect(client.authenticate({ password: 'wrong step' })).rejects.toMatchObject({
       code: 'login_action_required',
     })
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'close') {
-        fake.emit(id, {
-          '@type': 'updateAuthorizationState',
-          authorization_state: { '@type': 'authorizationStateClosed' },
-        })
-        fake.reply(id, request, { '@type': 'ok' })
-      }
-    }
+    answerClose(fake)
     await client.close()
     expect(fake.sent.map(({ request }) => request['@type'])).not.toContain('logOut')
   })
 
   it('times out a missing authorization update through the injected deadline', async () => {
-    const fake = new FakeTdjson()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    let fireDeadline: (() => void) | undefined
-    let timerReady: (() => void) | undefined
-    const ready = new Promise<void>((resolve) => {
-      timerReady = resolve
-    })
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState')
-        fake.reply(id, request, { '@type': 'authorizationStateWaitCode' })
+    const timer = armedDeadline()
+    const { client, fake, input } = await fixture(timer.deadline)
+    authorize(fake, 'authorizationStateWaitCode', (id, request) => {
       if (request['@type'] === 'checkAuthenticationCode') fake.reply(id, request, { '@type': 'ok' })
-    }
-    const client = createAccountClient(fake, (callback) => {
-      fireDeadline = callback
-      timerReady?.()
-      return inertDeadline()
     })
-    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
+    await client.start(input)
     const login = client.authenticate({ code: '12345' })
-    await ready
-    fireDeadline?.()
+    await timer.ready
+    timer.fire()
     await expect(login).rejects.toMatchObject({ code: 'unknown' })
   })
 })
@@ -639,7 +653,7 @@ describe('history, sends and downloads', () => {
     const { client, fake } = await started()
     fake.onSend = (id, request) => {
       if (request['@type'] !== 'sendMessage') return
-      fake.emit(id, { '@type': 'updateDeleteMessages', message_ids: [70] })
+      fake.emit(id, { '@type': 'updateDeleteMessages', chat_id: 33, message_ids: [70] })
       fake.reply(id, request, { '@type': 'message', id: 70 })
     }
     await expect(client.send('33', { kind: 'text', text: 'x' })).rejects.toMatchObject({ code: 'unknown' })
@@ -651,7 +665,11 @@ describe('history, sends and downloads', () => {
     fake.onSend = (id, request) => {
       if (request['@type'] !== 'sendMessage') return
       const old = ++temporary
-      fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: old, message: { id: 42 * 1048576 } })
+      fake.emit(id, {
+        '@type': 'updateMessageSendSucceeded',
+        old_message_id: old,
+        message: { id: 42 * 1048576, chat_id: 33 },
+      })
       fake.reply(id, request, { '@type': 'message', id: old })
     }
     const topics = [
@@ -733,18 +751,8 @@ describe('history, sends and downloads', () => {
     }
     const messages: Event[] = []
     client.onMessage((entry) => messages.push(entry))
-    const closed = new Promise<Event>((resolve) =>
-      client.onState((state) => {
-        if (state.state === 'closed') resolve(state)
-      }),
-    )
-    fake.emit(1, {
-      '@type': 'updateNewMessage',
-      message: {
-        ...message({ '@type': 'messageText', text: { text: 'hi', entities: [] } }),
-        sender_id: { '@type': 'messageSenderUser', user_id: 91 },
-      },
-    })
+    const closed = untilState(client, 'closed')
+    emitFromUser(fake, 91, 'hi')
     expect(await closed).toEqual({ state: 'closed', reason: 'session_lost' })
     expect(messages).toEqual([])
   })
@@ -759,26 +767,10 @@ describe('history, sends and downloads', () => {
     }
     const received = new Promise<Event>((resolve) => client.onMessage(resolve))
     fake.emit(1, { '@type': 'updateUser', user: { id: 92, type: { '@type': 'userTypeDeleted' } } })
-    fake.emit(1, {
-      '@type': 'updateNewMessage',
-      message: {
-        ...message({ '@type': 'messageText', text: { text: 'hi', entities: [] } }),
-        sender_id: { '@type': 'messageSenderUser', user_id: 92 },
-      },
-    })
+    emitFromUser(fake, 92, 'hi')
     expect((await received).sender).toEqual({ kind: 'user', id: '92', isBot: false })
-    const closed = new Promise<Event>((resolve) =>
-      client.onState((state) => {
-        if (state.state === 'closed') resolve(state)
-      }),
-    )
-    fake.emit(1, {
-      '@type': 'updateNewMessage',
-      message: {
-        ...message({ '@type': 'messageText', text: { text: 'no', entities: [] } }),
-        sender_id: { '@type': 'messageSenderUser', user_id: 93 },
-      },
-    })
+    const closed = untilState(client, 'closed')
+    emitFromUser(fake, 93, 'no')
     expect(await closed).toEqual({ state: 'closed', reason: 'session_lost' })
   })
 
@@ -809,7 +801,11 @@ describe('history, sends and downloads', () => {
       expect(statSync(path).mode & 0o777).toBe(0o600)
       expect(statSync(join(path, '..')).mode & 0o777).toBe(0o700)
       const temp = ++sequence
-      fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: temp, message: { id: temp + 100 } })
+      fake.emit(id, {
+        '@type': 'updateMessageSendSucceeded',
+        old_message_id: temp,
+        message: { id: temp + 100, chat_id: 33 },
+      })
       fake.reply(id, request, { '@type': 'message', id: temp })
     }
     for (const kind of ['image', 'audio', 'voice', 'video', 'file'] as const) {
@@ -924,7 +920,7 @@ describe('history, sends and downloads', () => {
     const { client, fake } = await started()
     fake.onSend = (id, request) => {
       if (request['@type'] === 'sendMessage') {
-        fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: 80, message: { id: 81 } })
+        fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: 80, message: { id: 81, chat_id: 33 } })
         fake.reply(id, request, { '@type': 'message', id: 80 })
       }
     }
@@ -934,58 +930,36 @@ describe('history, sends and downloads', () => {
   })
 
   it('accepts success arriving after the temporary send response', async () => {
-    const fake = new FakeTdjson()
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    let waiterRegistered: (() => void) | undefined
-    const waiting = new Promise<void>((resolve) => {
-      waiterRegistered = resolve
-    })
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': 'authorizationStateReady' })
-      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
-      if (request['@type'] === 'sendMessage') fake.reply(id, request, { '@type': 'message', id: 80 })
-    }
-    const client = createAccountClient(fake, (_callback) => {
-      waiterRegistered?.()
-      return inertDeadline()
-    })
-    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
+    const { client, fake, timer } = await awaitingConfirmation(80)
     const result = client.send('33', { kind: 'text', text: 'hello' })
-    await waiting
-    fake.emit(1, { '@type': 'updateMessageSendSucceeded', old_message_id: 80, message: { id: 81 } })
+    await timer.ready
+    fake.emit(1, { '@type': 'updateMessageSendSucceeded', old_message_id: 80, message: { id: 81, chat_id: 33 } })
     expect(await result).toEqual({ messageId: '81' })
   })
 
+  it('correlates a confirmation with the chat of its temporary id', async () => {
+    const { client, fake, timer } = await awaitingConfirmation(80)
+    const first = client.send('33', { kind: 'text', text: 'one' })
+    await timer.ready
+    const second = client.send('44', { kind: 'text', text: 'two' })
+    fake.emit(1, { '@type': 'updateMessageSendSucceeded', old_message_id: 80, message: { id: 91, chat_id: 44 } })
+    expect(await second).toEqual({ messageId: '91' })
+    fake.emit(1, { '@type': 'updateMessageSendSucceeded', old_message_id: 80, message: { id: 81, chat_id: 33 } })
+    expect(await first).toEqual({ messageId: '81' })
+  })
+
   it('maps pre-dispatch and failed sends, and uses the unknown outcome after dispatch timeout', async () => {
-    const { fake } = await started()
-    let fireDeadline: (() => void) | undefined
-    let timerReady: (() => void) | undefined
-    const timeoutReady = new Promise<void>((resolve) => {
-      timerReady = resolve
-    })
-    const client = createAccountClient(fake, (callback) => {
-      fireDeadline = callback
-      timerReady?.()
-      return inertDeadline()
-    })
-    const dir = await mkdtemp(join(tmpdir(), 'telegram-account-'))
-    directories.push(dir)
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'getAuthorizationState') fake.reply(id, request, { '@type': 'authorizationStateReady' })
-      if (request['@type'] === 'getMe') fake.reply(id, request, { '@type': 'user', id: 27 })
-      if (request['@type'] === 'sendMessage') fake.reply(id, request, { '@type': 'message', id: 99 })
-    }
-    await client.start({ apiId: 1, apiHash: 'h', databaseDir: join(dir, 'db'), filesDir: join(dir, 'files') })
+    const { client, fake, timer } = await awaitingConfirmation(99)
     const unknown = client.send('33', { kind: 'text', text: 'payload' })
-    await timeoutReady
-    fireDeadline?.()
+    await timer.ready
+    timer.fire()
     await expect(unknown).rejects.toMatchObject({ code: 'unknown' })
     fake.onSend = (id, request) => {
       if (request['@type'] === 'sendMessage') {
         fake.emit(id, {
           '@type': 'updateMessageSendFailed',
           old_message_id: 99,
+          message: { id: 99, chat_id: 33 },
           error: { '@type': 'error', code: 403, message: 'upload rejected' },
         })
         fake.reply(id, request, { '@type': 'message', id: 99 })
@@ -1019,7 +993,11 @@ describe('history, sends and downloads', () => {
     fake.onSend = (id, request) => {
       if (request['@type'] === 'sendMessage') {
         const temp = ++sequence
-        fake.emit(id, { '@type': 'updateMessageSendSucceeded', old_message_id: temp, message: { id: temp + 100 } })
+        fake.emit(id, {
+          '@type': 'updateMessageSendSucceeded',
+          old_message_id: temp,
+          message: { id: temp + 100, chat_id: 33 },
+        })
         fake.reply(id, request, { '@type': 'message', id: temp })
       }
     }
