@@ -3,6 +3,7 @@ import { PassThrough, type Readable, type Transform } from 'node:stream'
 import type { DiscordGatewayAdapterCreator, VoiceConnection, AudioPlayer, AudioResource } from '@discordjs/voice'
 import { z } from 'zod'
 
+import { EventQueue } from '../../shared/event-queue'
 import type { DiscordBotListener } from './listener'
 import type { DiscordVoiceServerUpdate, DiscordVoiceStateUpdate } from './types'
 
@@ -44,45 +45,6 @@ export interface DiscordVoiceHandle {
   readonly pcmOut: { write(frame: Uint8Array): Promise<void> }
   readonly events: AsyncIterable<VoiceEvent>
   leave(): Promise<void>
-}
-
-class EventQueue<T> implements AsyncIterable<T> {
-  private values: T[] = []
-  private pending: ((result: IteratorResult<T>) => void) | null = null
-  private closed = false
-
-  push(value: T): void {
-    if (this.closed) return
-    if (this.pending) {
-      const resolve = this.pending
-      this.pending = null
-      resolve({ value, done: false })
-    } else {
-      this.values.push(value)
-    }
-  }
-
-  end(): void {
-    this.closed = true
-    this.pending?.({ value: undefined, done: true })
-    this.pending = null
-  }
-
-  async *[Symbol.asyncIterator](): AsyncIterator<T> {
-    while (true) {
-      if (this.values.length) {
-        yield this.values.shift()!
-      } else if (this.closed) {
-        return
-      } else {
-        const next = await new Promise<IteratorResult<T>>((resolve) => {
-          this.pending = resolve
-        })
-        if (next.done) return
-        yield next.value
-      }
-    }
-  }
 }
 
 export function voiceAdapter(
