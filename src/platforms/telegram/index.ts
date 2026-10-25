@@ -9,7 +9,9 @@ export type {
   TelegramAccountClient,
   TelegramAccountErrorCode,
   TelegramAccountMessage,
+  TelegramAccountState,
   TelegramHistoryPage,
   TelegramLoginAction,
   TelegramSendContent,
+  TelegramSendBytes,
 } from './account-types'
