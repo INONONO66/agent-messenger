@@ -15,6 +15,7 @@ export declare function createHuddleAudio(key: string, onFailure: (detail: strin
     };
     pcmIn: HuddleFrames;
     write: (pcm: Uint8Array) => Promise<void>;
+    startCapture: () => Promise<void>;
     close: () => Promise<void>;
     verifyRoutes(): Promise<void>;
 }>;

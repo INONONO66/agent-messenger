@@ -23,6 +23,10 @@ export const spawnHuddleProcess = (command, args, env) => {
                 process.disconnect();
         });
     }
+    const spawned = new Promise((resolve) => {
+        child.once('spawn', () => resolve(true));
+        child.once('error', () => resolve(false));
+    });
     const exited = new Promise((resolve) => {
         child.once('error', () => resolve({ code: -1, signal: null }));
         child.once('close', (code, signal) => {
@@ -41,6 +45,7 @@ export const spawnHuddleProcess = (command, args, env) => {
         output: child.stdout,
         errors: child.stderr,
         exited,
+        spawned,
         kill,
     };
 };

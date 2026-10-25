@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { z } from 'zod';
-import { huddleClock, SlackHuddleError } from './huddle-contract.js';
+import { huddleClock, JsonText, SlackHuddleError } from './huddle-contract.js';
 export function connectCdp(url) {
     const address = new URL(url);
     if (address.protocol !== 'ws:' || address.hostname !== '127.0.0.1') {
@@ -27,11 +27,12 @@ export function connectCdp(url) {
         },
     };
 }
-const Packet = z.union([
-    z.object({ id: z.number().int(), result: z.record(z.string(), z.unknown()), sessionId: z.string().optional() }),
+const Fields = z.record(z.string(), z.json());
+const Packet = JsonText.pipe(z.union([
+    z.object({ id: z.number().int(), result: Fields, sessionId: z.string().optional() }),
     z.object({ id: z.number().int(), error: z.object({ code: z.number(), message: z.string() }) }),
-    z.object({ method: z.string(), params: z.record(z.string(), z.unknown()), sessionId: z.string().optional() }),
-]);
+    z.object({ method: z.string(), params: Fields, sessionId: z.string().optional() }),
+]));
 export class HuddleCdp {
     wire;
     fault;
@@ -48,15 +49,7 @@ export class HuddleCdp {
         this.unsubscribe = wire.subscribe((message) => this.receive(message), () => this.fail('cdp_closed'));
     }
     receive(message) {
-        let value;
-        try {
-            value = JSON.parse(message);
-        }
-        catch {
-            this.fail('cdp_packet_invalid');
-            return;
-        }
-        const parsed = Packet.safeParse(value);
+        const parsed = Packet.safeParse(message);
         if (!parsed.success) {
             this.fail('cdp_packet_invalid');
             return;

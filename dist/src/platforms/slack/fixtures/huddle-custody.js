@@ -1,3 +1,4 @@
+import { HuddleCommand } from '../huddle-contract.js';
 import { runHuddleHost } from '../huddle-host.js';
 import { HuddleProcesses, spawnHuddleProcess } from '../huddle-process.js';
 // Real subprocesses stand in for the host's external programs. The browser root
@@ -23,10 +24,11 @@ runHuddleHost({
         process.send?.(message);
     },
     subscribe(message, disconnected) {
-        process.on('message', message);
+        const receive = (value) => message(HuddleCommand.safeParse(value).data);
+        process.on('message', receive);
         process.once('disconnect', disconnected);
         return () => {
-            process.off('message', message);
+            process.off('message', receive);
             process.off('disconnect', disconnected);
         };
     },

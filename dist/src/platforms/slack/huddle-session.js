@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { EventQueue } from '../../shared/event-queue.js';
 import { HuddleReply, huddleClock, huddleFailure, singleConsumer, SlackHuddleError, } from './huddle-contract.js';
 import { HuddleFrames, HuddleWriter } from './huddle-pcm.js';
+import { createHuddleProfile, huddleProfileRoot, removeHuddleProfile, sweepHuddleProfiles, warnHuddleProfile, } from './huddle-profile.js';
 export const huddleHostUrl = new URL(import.meta.url.endsWith('.ts') ? './huddle-host.ts' : './huddle-host.js', import.meta.url);
+const Missing = z.object({ code: z.literal('ESRCH') });
 export function spawnHuddleHost(hostUrl = huddleHostUrl) {
     const child = fork(fileURLToPath(hostUrl), [], {
         execPath: process.execPath,
@@ -18,7 +20,7 @@ export function spawnHuddleHost(hostUrl = huddleHostUrl) {
                 process.kill(-pid, 'SIGKILL');
             }
             catch (error) {
-                if (!z.object({ code: z.literal('ESRCH') }).safeParse(error).success)
+                if (!Missing.safeParse(error).success)
                     throw error;
             }
         }
@@ -33,13 +35,13 @@ export function spawnHuddleHost(hostUrl = huddleHostUrl) {
         },
         subscribe(message, exited) {
             const receive = (value) => {
-                const packet = HuddleReply.safeParse(value);
-                if (packet.success && packet.data.type === 'owned_process')
-                    owned.add(packet.data.pid);
-                else if (packet.success && packet.data.type === 'released_process')
-                    owned.delete(packet.data.pid);
+                const reply = HuddleReply.safeParse(value).data;
+                if (reply?.type === 'owned_process')
+                    owned.add(reply.pid);
+                else if (reply?.type === 'released_process')
+                    owned.delete(reply.pid);
                 else
-                    message(value);
+                    message(reply);
             };
             const dead = () => {
                 killOwned();
@@ -64,9 +66,21 @@ export function spawnHuddleHost(hostUrl = huddleHostUrl) {
         },
     };
 }
-export function openHuddleSession(input, options, dependencies = {}) {
-    const transport = dependencies.transport ?? spawnHuddleHost();
-    const clock = dependencies.clock ?? huddleClock;
+export async function openHuddleSession(request, options, dependencies = {}) {
+    const root = dependencies.profileRoot ?? huddleProfileRoot;
+    await sweepHuddleProfiles(root);
+    const profile = await createHuddleProfile(root);
+    let transport;
+    try {
+        transport = (dependencies.transport ?? spawnHuddleHost)();
+    }
+    catch (error) {
+        await removeHuddleProfile(profile).catch(() => warnHuddleProfile('huddle_profile_remove_failed', profile));
+        throw huddleFailure(error);
+    }
+    return superviseHost({ ...request, profile }, transport, options, dependencies.clock ?? huddleClock);
+}
+function superviseHost(input, transport, options, clock) {
     const events = new EventQueue();
     const pending = new Map();
     let sequence = 0;
@@ -75,8 +89,7 @@ export function openHuddleSession(input, options, dependencies = {}) {
     let released = false;
     let cleanupFailure;
     let left;
-    let leftResolve = () => { };
-    let leftReject = (_error) => { };
+    let settleLeft = () => { };
     let cancelCleanup = () => { };
     const frames = new HuddleFrames((bytes) => {
         if (!stopping)
@@ -98,39 +111,32 @@ export function openHuddleSession(input, options, dependencies = {}) {
             return;
         released = true;
         cancelCleanup();
-        unsubscribe();
         options.signal.removeEventListener('abort', aborted);
         transport.disconnect();
         options.release();
-        if (cleanupFailure)
-            leftReject(cleanupFailure);
-        else
-            leftResolve();
+    };
+    const closeStreams = () => {
+        for (const close of [() => writer.close(), () => frames.end()]) {
+            try {
+                close();
+            }
+            catch (error) {
+                cleanupFailure = huddleFailure(error);
+            }
+        }
+        for (const request of pending.values())
+            request.reject(new SlackHuddleError('voice_join_failed', 'pcm_closed'));
+        pending.clear();
+        events.end();
     };
     const leave = () => {
         if (left)
             return left;
         stopping = true;
         left = new Promise((resolve, reject) => {
-            leftResolve = resolve;
-            leftReject = reject;
+            settleLeft = () => (cleanupFailure ? reject(cleanupFailure) : resolve());
         });
-        try {
-            writer.close();
-        }
-        catch (error) {
-            cleanupFailure = huddleFailure(error);
-        }
-        try {
-            frames.end();
-        }
-        catch (error) {
-            cleanupFailure = huddleFailure(error);
-        }
-        for (const request of pending.values())
-            request.reject(new SlackHuddleError('voice_join_failed', 'pcm_closed'));
-        pending.clear();
-        events.end();
+        closeStreams();
         cancelCleanup = clock.after(5_000, () => {
             cleanupFailure = new SlackHuddleError('voice_join_failed', 'cleanup_timeout');
             // Kill the reported owned groups before the unresponsive supervisor.
@@ -146,57 +152,67 @@ export function openHuddleSession(input, options, dependencies = {}) {
             return;
         events.push(event);
         const failure = error ?? new SlackHuddleError('voice_join_failed', 'reason' in event ? event.reason : 'speaker_left');
-        void leave().then(() => {
+        const refuse = () => {
             if (!ready)
                 joinedReject(failure);
-        }, () => {
-            if (!ready)
-                joinedReject(failure);
-        });
+        };
+        void leave().then(refuse, refuse);
     };
     const aborted = () => terminal({ type: 'disconnected', reason: 'aborted' }, huddleFailure(options.signal.reason, 'join_aborted'));
-    const unsubscribe = transport.subscribe((value) => {
-        const result = HuddleReply.safeParse(value);
-        if (!result.success) {
+    const becomeReady = () => {
+        if (ready) {
             terminal({ type: 'error', reason: 'host_protocol_invalid' });
             return;
         }
-        const message = result.data;
+        ready = true;
+        events.push({ type: 'ready' });
+        joinedResolve({ pcmIn: frames, pcmOut: writer, events: singleConsumer(events), leave });
+    };
+    const deliver = (data) => {
+        try {
+            if (!ready)
+                throw new SlackHuddleError('voice_join_failed', 'pcm_before_ready');
+            frames.push(Buffer.from(data, 'base64'));
+        }
+        catch (error) {
+            terminal({ type: 'error', reason: huddleFailure(error).detail });
+        }
+    };
+    const acknowledge = (id) => {
+        const request = pending.get(id);
+        if (!request) {
+            terminal({ type: 'error', reason: 'host_protocol_invalid' });
+            return;
+        }
+        pending.delete(id);
+        request.resolve();
+    };
+    const hostLeft = (error) => {
+        if (!stopping)
+            terminal({ type: 'disconnected', reason: 'host_closed' });
+        if (error)
+            cleanupFailure = new SlackHuddleError('voice_join_failed', error);
+        finish();
+    };
+    const receive = (message) => {
+        if (released)
+            return;
+        if (!message) {
+            terminal({ type: 'error', reason: 'host_protocol_invalid' });
+            return;
+        }
         if (stopping && message.type !== 'left')
             return;
         switch (message.type) {
-            case 'owned_process':
-            case 'released_process':
-                break;
             case 'ready':
-                if (ready) {
-                    terminal({ type: 'error', reason: 'host_protocol_invalid' });
-                    return;
-                }
-                ready = true;
-                events.push({ type: 'ready' });
-                joinedResolve({ pcmIn: frames, pcmOut: writer, events: singleConsumer(events), leave });
+                becomeReady();
                 break;
             case 'pcm':
-                try {
-                    if (!ready)
-                        throw new SlackHuddleError('voice_join_failed', 'pcm_before_ready');
-                    frames.push(Buffer.from(message.data, 'base64'));
-                }
-                catch (error) {
-                    terminal({ type: 'error', reason: huddleFailure(error).detail });
-                }
+                deliver(message.data);
                 break;
-            case 'written': {
-                const request = pending.get(message.id);
-                if (!request) {
-                    terminal({ type: 'error', reason: 'host_protocol_invalid' });
-                    return;
-                }
-                pending.delete(message.id);
-                request.resolve();
+            case 'written':
+                acknowledge(message.id);
                 break;
-            }
             case 'error':
                 terminal({ type: 'error', reason: message.reason }, new SlackHuddleError(message.code, message.reason));
                 break;
@@ -205,20 +221,23 @@ export function openHuddleSession(input, options, dependencies = {}) {
                 terminal(message);
                 break;
             case 'left':
-                if (!stopping)
-                    terminal({ type: 'disconnected', reason: 'host_closed' });
-                if (message.error)
-                    cleanupFailure = new SlackHuddleError('voice_join_failed', message.error);
-                finish();
+                hostLeft(message.error);
                 break;
         }
-    }, () => {
+    };
+    const exited = () => {
         if (!stopping)
             terminal({ type: 'disconnected', reason: 'host_exit' });
-        if (!cleanupFailure)
-            cleanupFailure = new SlackHuddleError('voice_join_failed', 'host_exit');
+        if (!released)
+            cleanupFailure ??= new SlackHuddleError('voice_join_failed', 'host_exit');
         finish();
-    });
+        unsubscribe();
+        // Removal follows the observed exit and never depends on the host's own cleanup succeeding.
+        void removeHuddleProfile(input.profile)
+            .catch(() => warnHuddleProfile('huddle_profile_remove_failed', input.profile))
+            .then(() => settleLeft());
+    };
+    const unsubscribe = transport.subscribe(receive, exited);
     options.signal.addEventListener('abort', aborted, { once: true });
     if (options.signal.aborted)
         aborted();

@@ -1,9 +1,10 @@
 import { createHuddleBrowser } from './huddle-browser.js';
-import { type HuddleClock, type HuddleReply } from './huddle-contract.js';
+import { HuddleCommand, type HuddleClock, type HuddleReply } from './huddle-contract.js';
 import { HuddleProcesses } from './huddle-process.js';
+/** Commands are parsed once at the channel; `undefined` marks a packet outside the host protocol. */
 export interface HuddleHostChannel {
     send(message: HuddleReply): void;
-    subscribe(message: (value: unknown) => void, disconnected: () => void): () => void;
+    subscribe(message: (command: HuddleCommand | undefined) => void, disconnected: () => void): () => void;
     finish(): void;
 }
 export declare function runHuddleHost(channel: HuddleHostChannel, dependencies?: {

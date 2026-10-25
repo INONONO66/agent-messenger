@@ -7,6 +7,7 @@ export declare function createHuddleJoin(dependencies: {
     readonly client: () => SlackClient;
     readonly transport: () => HuddleTransport;
     readonly clock: HuddleClock;
+    readonly profileRoot?: string;
 }): (workspaceId: string, channelId: string, options: {
     readonly credentials: SlackSessionCredentials;
     readonly speakerId: string;

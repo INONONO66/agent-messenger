@@ -98,6 +98,10 @@ export function runHuddleHost(channel, dependencies = {}) {
             }, { processes: browserProcesses, connect: dependencies.connect });
             if (abort.signal.aborted || stopping)
                 return;
+            // Capture opens only after admission and the post-unmute check, so no earlier audio exists.
+            await activeAudio.startCapture();
+            if (stopping)
+                return;
             ready = true;
             send({ type: 'ready' });
             const activeBrowser = browser;
@@ -124,13 +128,11 @@ export function runHuddleHost(channel, dependencies = {}) {
             void stop();
         }
     };
-    const unsubscribe = channel.subscribe((value) => {
-        const parsed = HuddleCommand.safeParse(value);
-        if (!parsed.success) {
+    const unsubscribe = channel.subscribe((command) => {
+        if (!command) {
             terminal({ type: 'error', reason: 'host_protocol_invalid' });
             return;
         }
-        const command = parsed.data;
         switch (command.type) {
             case 'start':
                 if (starting || stopping) {
@@ -172,12 +174,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.send) {
             });
         },
         subscribe(message, disconnected) {
-            process.on('message', message);
+            const receive = (value) => message(HuddleCommand.safeParse(value).data);
+            process.on('message', receive);
             process.once('disconnect', disconnected);
             process.once('SIGTERM', disconnected);
             process.once('SIGINT', disconnected);
             return () => {
-                process.off('message', message);
+                process.off('message', receive);
                 process.off('disconnect', disconnected);
                 process.off('SIGTERM', disconnected);
                 process.off('SIGINT', disconnected);

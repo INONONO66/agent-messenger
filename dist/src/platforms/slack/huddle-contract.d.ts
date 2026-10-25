@@ -29,6 +29,19 @@ export declare class SlackHuddleError extends Error {
     readonly detail: string;
     constructor(code: SlackHuddleErrorCode, detail: string);
 }
+export declare const HuddleRequest: z.ZodObject<{
+    type: z.ZodLiteral<"start">;
+    workspaceId: z.ZodString;
+    channelId: z.ZodString;
+    speakerId: z.ZodString;
+    seatId: z.ZodString;
+    credentials: z.ZodObject<{
+        token: z.ZodString;
+        cookie: z.ZodString;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export type HuddleRequest = z.infer<typeof HuddleRequest>;
+/** The parent owns the browser profile; the host uses this path and never chooses its own. */
 export declare const HuddleStart: z.ZodObject<{
     type: z.ZodLiteral<"start">;
     workspaceId: z.ZodString;
@@ -39,6 +52,7 @@ export declare const HuddleStart: z.ZodObject<{
         token: z.ZodString;
         cookie: z.ZodString;
     }, z.core.$strip>;
+    profile: z.ZodString;
 }, z.core.$strip>;
 export type HuddleStart = z.infer<typeof HuddleStart>;
 export declare const HuddleCommand: z.ZodDiscriminatedUnion<[z.ZodObject<{
@@ -51,6 +65,7 @@ export declare const HuddleCommand: z.ZodDiscriminatedUnion<[z.ZodObject<{
         token: z.ZodString;
         cookie: z.ZodString;
     }, z.core.$strip>;
+    profile: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"write">;
     id: z.ZodNumber;
@@ -61,6 +76,7 @@ export declare const HuddleCommand: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"leave">;
 }, z.core.$strip>], "type">;
+export type HuddleCommand = z.infer<typeof HuddleCommand>;
 export declare const HuddleReply: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"owned_process">;
     pid: z.ZodNumber;
@@ -95,10 +111,14 @@ export declare const HuddleReply: z.ZodDiscriminatedUnion<[z.ZodObject<{
     error: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>], "type">;
 export type HuddleReply = z.infer<typeof HuddleReply>;
+/** JSON text from a page or socket; pipe it into the schema of the value it must carry. */
+export declare const JsonText: z.ZodPipe<z.ZodString, z.ZodTransform<string | number | boolean | z.util.JSONType[] | {
+    [key: string]: z.util.JSONType;
+} | null, string>>;
 export interface HuddleClock {
     after(ms: number, action: () => void): () => void;
 }
 export declare const huddleClock: HuddleClock;
-export declare function huddleFailure(error: unknown, detail?: string): SlackHuddleError;
+export declare function huddleFailure<Failure>(error: Failure, detail?: string): SlackHuddleError;
 export declare function singleConsumer<T>(source: AsyncIterable<T>): AsyncIterable<T>;
 //# sourceMappingURL=huddle-contract.d.ts.map

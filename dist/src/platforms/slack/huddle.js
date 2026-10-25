@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { SlackClient } from './client.js';
-import { HuddleStart, huddleClock, huddleFailure, SlackHuddleError, } from './huddle-contract.js';
+import { HuddleRequest, huddleClock, huddleFailure, SlackHuddleError, } from './huddle-contract.js';
 import { openHuddleSession, spawnHuddleHost } from './huddle-session.js';
 export { SlackHuddleError } from './huddle-contract.js';
 // The seat ID is not in an xoxc/d credential pair. Reserve the workspace during
@@ -58,7 +58,7 @@ export function createHuddleJoin(dependencies) {
             seat = key;
             authenticating.delete(workspaceId);
             ownsAuthentication = false;
-            const input = HuddleStart.safeParse({
+            const input = HuddleRequest.safeParse({
                 type: 'start',
                 workspaceId,
                 channelId,
@@ -69,8 +69,9 @@ export function createHuddleJoin(dependencies) {
             if (!input.success)
                 throw new SlackHuddleError('voice_join_failed', 'address_invalid');
             const handle = await openHuddleSession(input.data, { signal: abort.signal, release }, {
-                transport: dependencies.transport(),
+                transport: dependencies.transport,
                 clock: dependencies.clock,
+                profileRoot: dependencies.profileRoot,
             });
             cancel();
             return handle;

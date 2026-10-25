@@ -8,6 +8,8 @@ export interface HuddleProcess {
         readonly code: number | null;
         readonly signal: string | null;
     }>;
+    /** Settles true on the child's `spawn` event and false on a spawn `error`. */
+    readonly spawned: Promise<boolean>;
     kill(): void;
 }
 export type HuddleSpawn = (command: string, args: readonly string[], env?: NodeJS.ProcessEnv) => HuddleProcess;
