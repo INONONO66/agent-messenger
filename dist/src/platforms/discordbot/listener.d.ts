@@ -27,6 +27,8 @@ export declare class DiscordBotListener {
     private generation;
     private startPromise;
     private pendingStartReject;
+    private voiceTeardowns;
+    private readySocket;
     constructor(client: DiscordBotClient, options?: DiscordBotListenerOptions);
     start(): Promise<void>;
     stop(): void;
@@ -34,6 +36,11 @@ export declare class DiscordBotListener {
     on<K extends EventKey>(event: K, listener: (...args: DiscordBotListenerEventMap[K]) => void): this;
     off<K extends EventKey>(event: K, listener: (...args: DiscordBotListenerEventMap[K]) => void): this;
     once<K extends EventKey>(event: K, listener: (...args: DiscordBotListenerEventMap[K]) => void): this;
+    listenerCount(event: EventKey): number;
+    botUserId(): string | undefined;
+    sendVoiceState(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): boolean;
+    registerVoiceTeardown(destroy: () => void): () => void;
+    private destroyVoice;
     private isCurrent;
     private connect;
     private handleMessage;

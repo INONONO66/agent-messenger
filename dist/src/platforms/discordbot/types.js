@@ -118,6 +118,24 @@ export const DiscordGatewayOpcode = {
     Hello: 10,
     HeartbeatACK: 11,
 };
+export const DiscordVoiceStateUpdateSchema = z.object({
+    guild_id: z.string().optional(),
+    channel_id: z.string().nullable(),
+    user_id: z.string(),
+    session_id: z.string(),
+    deaf: z.boolean(),
+    mute: z.boolean(),
+    self_deaf: z.boolean(),
+    self_mute: z.boolean(),
+    self_video: z.boolean(),
+    suppress: z.boolean(),
+    self_stream: z.boolean().optional(),
+});
+export const DiscordVoiceServerUpdateSchema = z.object({
+    token: z.string(),
+    guild_id: z.string(),
+    endpoint: z.string().nullable(),
+});
 export const DiscordIntent = {
     Guilds: 1 << 0,
     GuildMembers: 1 << 1, // privileged

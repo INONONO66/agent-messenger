@@ -246,6 +246,26 @@ export declare const DiscordGatewayOpcode: {
     readonly Hello: 10;
     readonly HeartbeatACK: 11;
 };
+export declare const DiscordVoiceStateUpdateSchema: z.ZodObject<{
+    guild_id: z.ZodOptional<z.ZodString>;
+    channel_id: z.ZodNullable<z.ZodString>;
+    user_id: z.ZodString;
+    session_id: z.ZodString;
+    deaf: z.ZodBoolean;
+    mute: z.ZodBoolean;
+    self_deaf: z.ZodBoolean;
+    self_mute: z.ZodBoolean;
+    self_video: z.ZodBoolean;
+    suppress: z.ZodBoolean;
+    self_stream: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
+export type DiscordVoiceStateUpdate = z.infer<typeof DiscordVoiceStateUpdateSchema>;
+export declare const DiscordVoiceServerUpdateSchema: z.ZodObject<{
+    token: z.ZodString;
+    guild_id: z.ZodString;
+    endpoint: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export type DiscordVoiceServerUpdate = z.infer<typeof DiscordVoiceServerUpdateSchema>;
 export declare const DiscordIntent: {
     readonly Guilds: number;
     readonly GuildMembers: number;
@@ -388,6 +408,8 @@ export interface DiscordGatewayGenericEvent {
 }
 export type DiscordGatewayEvent = DiscordGatewayMessageCreateEvent | DiscordGatewayMessageUpdateEvent | DiscordGatewayMessageDeleteEvent | DiscordGatewayReactionEvent | DiscordGatewayMemberEvent | DiscordGatewayTypingEvent | DiscordGatewayPresenceEvent | DiscordGatewayChannelEvent | DiscordGatewayGuildEvent | DiscordGatewayInteractionEvent | DiscordGatewayGenericEvent;
 export interface DiscordBotListenerEventMap {
+    voice_state_update: [state: DiscordVoiceStateUpdate, sequence: number | null];
+    voice_server_update: [server: DiscordVoiceServerUpdate];
     message_create: [event: DiscordGatewayMessageCreateEvent];
     message_update: [event: DiscordGatewayMessageUpdateEvent];
     message_delete: [event: DiscordGatewayMessageDeleteEvent];

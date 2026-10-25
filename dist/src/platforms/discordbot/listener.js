@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import { DiscordGatewayOpcode, DiscordIntent } from './types.js';
+import { DiscordGatewayOpcode, DiscordIntent, DiscordVoiceServerUpdateSchema, DiscordVoiceStateUpdateSchema } from './types.js';
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 const GATEWAY_QUERY = '?v=10&encoding=json';
 const RECONNECT_BASE_DELAY = 1_000;
@@ -40,6 +40,8 @@ export class DiscordBotListener {
     generation = 0;
     startPromise = null;
     pendingStartReject = null;
+    voiceTeardowns = new Set();
+    readySocket = null;
     constructor(client, options) {
         this.client = client;
         this.intents = options?.intents ?? DEFAULT_INTENTS;
@@ -108,6 +110,7 @@ export class DiscordBotListener {
         return startPromise;
     }
     stop() {
+        this.destroyVoice();
         this.running = false;
         this.generation++;
         this.clearTimers();
@@ -127,6 +130,7 @@ export class DiscordBotListener {
         this.resumeGatewayUrl = null;
         this.token = null;
         this.cachedUser = null;
+        this.readySocket = null;
         rejectStart?.(new Error('Discord gateway start was stopped before becoming ready'));
     }
     teardownFailedStart(generation) {
@@ -145,6 +149,32 @@ export class DiscordBotListener {
     once(event, listener) {
         this.emitter.once(event, listener);
         return this;
+    }
+    listenerCount(event) {
+        return this.emitter.listenerCount(event);
+    }
+    botUserId() {
+        return this.readySocket === this.ws && this.ws?.readyState === WebSocket.OPEN
+            ? this.cachedUser?.id
+            : undefined;
+    }
+    sendVoiceState(guildId, channelId, selfMute, selfDeaf) {
+        if (!this.botUserId())
+            return false;
+        this.ws?.send(JSON.stringify({
+            op: DiscordGatewayOpcode.VoiceStateUpdate,
+            d: { guild_id: guildId, channel_id: channelId, self_mute: selfMute, self_deaf: selfDeaf },
+        }));
+        return true;
+    }
+    registerVoiceTeardown(destroy) {
+        this.voiceTeardowns.add(destroy);
+        return () => { this.voiceTeardowns.delete(destroy); };
+    }
+    destroyVoice() {
+        for (const destroy of this.voiceTeardowns)
+            destroy();
+        this.voiceTeardowns.clear();
     }
     isCurrent(generation, ws) {
         if (generation !== this.generation || !this.running)
@@ -184,6 +214,8 @@ export class DiscordBotListener {
             ws.on('close', (code) => {
                 if (!this.isCurrent(generation, ws))
                     return;
+                this.destroyVoice();
+                this.readySocket = null;
                 this.clearTimers();
                 this.ws = null;
                 if (NON_RECOVERABLE_CLOSE_CODES.includes(code)) {
@@ -237,7 +269,7 @@ export class DiscordBotListener {
                 if (typeof s === 'number')
                     this.sequence = s;
                 if (t)
-                    this.handleDispatch(t, d);
+                    this.handleDispatch(t, d, typeof s === 'number' ? s : null, ws);
                 break;
             case DiscordGatewayOpcode.Reconnect:
                 this.reconnectAttempts = 0;
@@ -265,23 +297,37 @@ export class DiscordBotListener {
                 break;
         }
     }
-    handleDispatch(t, d) {
+    handleDispatch(t, d, sequence, ws) {
         if (t === 'READY') {
             this.sessionId = d.session_id;
             this.resumeGatewayUrl = d.resume_gateway_url;
             this.cachedUser = d.user;
+            this.readySocket = ws;
             this.reconnectAttempts = 0;
             this.emitter.emit('connected', { user: d.user, sessionId: d.session_id });
             return;
         }
         if (t === 'RESUMED') {
+            this.readySocket = ws;
             this.reconnectAttempts = 0;
             this.emitter.emit('connected', { user: this.cachedUser, sessionId: this.sessionId });
             return;
         }
         const eventType = t.toLowerCase();
         const event = { ...d, type: t };
-        this.emitter.emit(eventType, event);
+        if (t === 'VOICE_STATE_UPDATE') {
+            const parsed = DiscordVoiceStateUpdateSchema.safeParse(d);
+            if (parsed.success)
+                this.emitter.emit('voice_state_update', parsed.data, sequence);
+        }
+        else if (t === 'VOICE_SERVER_UPDATE') {
+            const parsed = DiscordVoiceServerUpdateSchema.safeParse(d);
+            if (parsed.success)
+                this.emitter.emit('voice_server_update', parsed.data);
+        }
+        else {
+            this.emitter.emit(eventType, event);
+        }
         this.emitter.emit('discord_event', event);
     }
     sendIdentify() {
