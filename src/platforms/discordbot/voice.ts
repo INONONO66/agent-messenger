@@ -1,6 +1,8 @@
 import { PassThrough, type Readable, type Transform } from 'node:stream'
-import { z } from 'zod'
+
 import type { DiscordGatewayAdapterCreator, VoiceConnection, AudioPlayer, AudioResource } from '@discordjs/voice'
+import { z } from 'zod'
+
 import type { DiscordBotListener } from './listener'
 import type { DiscordVoiceServerUpdate, DiscordVoiceStateUpdate } from './types'
 
@@ -14,10 +16,18 @@ const VoicePayload = z.object({
   }),
 })
 
-export type DiscordVoiceErrorCode = 'voice_not_ready' | 'voice_busy' | 'voice_aborted' | 'voice_join_failed'
+export type DiscordVoiceErrorCode =
+  | 'voice_not_ready'
+  | 'voice_busy'
+  | 'voice_aborted'
+  | 'voice_join_failed'
+  | 'voice_overflow'
 
 export class DiscordVoiceError extends Error {
-  constructor(readonly code: DiscordVoiceErrorCode, cause?: Error) {
+  constructor(
+    readonly code: DiscordVoiceErrorCode,
+    cause?: Error,
+  ) {
     super(code, { cause })
     this.name = 'DiscordVoiceError'
   }
@@ -65,7 +75,9 @@ class EventQueue<T> implements AsyncIterable<T> {
       } else if (this.closed) {
         return
       } else {
-        const next = await new Promise<IteratorResult<T>>((resolve) => { this.pending = resolve })
+        const next = await new Promise<IteratorResult<T>>((resolve) => {
+          this.pending = resolve
+        })
         if (next.done) return
         yield next.value
       }
@@ -142,6 +154,7 @@ async function defaultSeams(): Promise<VoiceSeams> {
 }
 
 const active = new WeakMap<DiscordBotListener, Set<string>>()
+const MAX_INGRESS_BYTES = 384_000
 
 export async function joinVoice(
   guildId: string,
@@ -159,97 +172,149 @@ export async function joinVoice(
   active.set(listener, guilds)
 
   let connection: Connection | undefined
-  let release = () => { guilds.delete(guildId) }
+  let opus: Readable | undefined
+  let decoder: Transform | undefined
+  let player: Player | undefined
+  let subscription: ReturnType<Connection['subscribe']> | undefined
+  let pcm: PassThrough | undefined
+  let output: PassThrough | undefined
+  let events: EventQueue<VoiceEvent> | undefined
+  let speakerGone = false
+  const speakerState = (state: DiscordVoiceStateUpdate) => {
+    if (!speakerGone && state.guild_id === guildId && state.user_id === speakerId && state.channel_id !== channelId) {
+      speakerGone = true
+      events?.push({ type: 'speaker_left', userId: speakerId })
+    }
+  }
+  listener.on('voice_state_update', speakerState)
+  let released = false
+  let releaseHandlers = () => {}
+  const cleanup = () => {
+    if (released) return
+    released = true
+    releaseHandlers()
+    listener.off('voice_state_update', speakerState)
+    subscription?.unsubscribe()
+    player?.stop(true)
+    opus?.destroy()
+    decoder?.destroy()
+    pcm?.destroy()
+    output?.destroy()
+    if (connection?.state.status !== 'destroyed') connection?.destroy()
+    guilds.delete(guildId)
+  }
   try {
-    const lib = seams ?? await defaultSeams()
+    const lib = seams ?? (await defaultSeams())
     if (signal?.aborted) throw new DiscordVoiceError('voice_aborted')
     connection = lib.join({
-      guildId, channelId, adapterCreator: voiceAdapter(listener, guildId, botId),
-      selfDeaf: false, selfMute: false, daveEncryption: true,
+      guildId,
+      channelId,
+      adapterCreator: voiceAdapter(listener, guildId, botId),
+      selfDeaf: false,
+      selfMute: false,
+      daveEncryption: true,
     })
     const deadline = AbortSignal.timeout(20_000)
     const readySignal = signal ? AbortSignal.any([signal, deadline]) : deadline
     await lib.ready(connection, readySignal)
     if (signal?.aborted) throw new DiscordVoiceError('voice_aborted')
+    if (speakerGone) throw new DiscordVoiceError('voice_join_failed')
     if (!listener.botUserId()) throw new DiscordVoiceError('voice_join_failed')
 
-    const events = new EventQueue<VoiceEvent>()
-    const pcm = new PassThrough({ highWaterMark: 38_400 })
-    const output = new PassThrough({ highWaterMark: 38_400 })
-    const opus = lib.receive(connection, speakerId)
-    const decoder = lib.decoder()
-    const player = lib.player()
-    const subscription = connection.subscribe(player)
-    player.play(lib.resource(output))
-    opus.pipe(decoder).pipe(pcm)
+    const readyEvents = new EventQueue<VoiceEvent>()
+    events = readyEvents
+    const input = new PassThrough({ highWaterMark: 38_400 })
+    pcm = input
+    const playback = new PassThrough({ highWaterMark: 38_400 })
+    output = playback
+    const receiveStream = lib.receive(connection, speakerId)
+    opus = receiveStream
+    const decodeStream = lib.decoder()
+    decoder = decodeStream
+    const audioPlayer = lib.player()
+    player = audioPlayer
+    subscription = connection.subscribe(audioPlayer)
+    audioPlayer.play(lib.resource(playback))
+    decodeStream.pipe(input)
     let closed = false
     let pendingWrite: (() => void) | undefined
-    let speakerGone = false
-    const writeError = new DiscordVoiceError('voice_join_failed')
+    let writeError = new DiscordVoiceError('voice_join_failed')
     const teardown = (reason?: string) => {
       if (closed) return
       closed = true
-      if (reason) events.push({ type: 'disconnected', reason })
-      events.end()
+      if (reason) readyEvents.push({ type: 'disconnected', reason })
+      readyEvents.end()
       if (pendingWrite) {
-        output.off('drain', pendingWrite)
+        playback.off('drain', pendingWrite)
         pendingWrite()
       }
-      listener.off('voice_state_update', speakerState)
-      signal?.removeEventListener('abort', aborted)
-      connection?.off('stateChange', stateChange)
-      connection?.off('error', fault)
-      subscription?.unsubscribe()
-      player.stop(true)
-      opus.destroy()
-      decoder.destroy()
-      pcm.end()
-      output.destroy()
-      if (connection?.state.status !== 'destroyed') connection?.destroy()
-      release()
-    }
-    const speakerState = (state: DiscordVoiceStateUpdate) => {
-      if (!speakerGone && state.guild_id === guildId && state.user_id === speakerId && state.channel_id !== channelId) {
-        speakerGone = true
-        events.push({ type: 'speaker_left', userId: speakerId })
-      }
+      cleanup()
     }
     const fault = (error: Error) => {
-      events.push({ type: 'error', reason: error.message })
+      readyEvents.push({ type: 'error', reason: error.message })
       teardown('error')
     }
     const stateChange = (_previous: { status: string }, next: { status: string }) => {
       if (next.status !== 'ready') teardown(next.status)
     }
     const aborted = () => teardown('aborted')
-    listener.on('voice_state_update', speakerState)
+    releaseHandlers = () => {
+      signal?.removeEventListener('abort', aborted)
+      connection?.off('stateChange', stateChange)
+      connection?.off('error', fault)
+    }
+    const ingress = (packet: Buffer) => {
+      if (
+        packet.length +
+          decodeStream.writableLength +
+          decodeStream.readableLength +
+          input.readableLength +
+          input.writableLength >
+        MAX_INGRESS_BYTES
+      ) {
+        writeError = new DiscordVoiceError('voice_overflow')
+        readyEvents.push({ type: 'error', reason: writeError.code })
+        teardown(writeError.code)
+        return
+      }
+      decodeStream.write(packet)
+    }
     connection.on('stateChange', stateChange)
     connection.on('error', fault)
-    opus.on('error', fault)
-    decoder.on('error', fault)
-    player.on('error', fault)
+    receiveStream.on('error', fault)
+    decodeStream.on('error', fault)
+    audioPlayer.on('error', fault)
+    receiveStream.on('data', ingress)
     signal?.addEventListener('abort', aborted, { once: true })
-    events.push({ type: 'ready' })
+    if (signal?.aborted) throw new DiscordVoiceError('voice_aborted')
+    if (speakerGone) throw new DiscordVoiceError('voice_join_failed')
+    readyEvents.push({ type: 'ready' })
     return {
-      pcmIn: pcm,
-      events,
+      pcmIn: input,
+      events: readyEvents,
       pcmOut: {
         write: async (frame) => {
           if (closed) throw writeError
-          if (output.write(frame)) return
+          if (pendingWrite) throw new DiscordVoiceError('voice_busy')
+          if (playback.write(frame)) return
           await new Promise<void>((resolve) => {
-            pendingWrite = resolve
-            output.once('drain', resolve)
+            const drain = () => {
+              playback.off('drain', drain)
+              resolve()
+            }
+            pendingWrite = drain
+            playback.once('drain', drain)
           })
           pendingWrite = undefined
           if (closed) throw writeError
         },
       },
-      leave: async () => { teardown() },
+      leave: async () => {
+        teardown()
+      },
     }
   } catch (error) {
-    if (connection?.state.status !== 'destroyed') connection?.destroy()
-    release()
+    cleanup()
     if (error instanceof DiscordVoiceError) throw error
     if (signal?.aborted) throw new DiscordVoiceError('voice_aborted')
     throw new DiscordVoiceError('voice_join_failed', error instanceof Error ? error : undefined)

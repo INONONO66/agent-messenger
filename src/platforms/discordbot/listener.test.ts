@@ -1,18 +1,27 @@
 import { afterEach, describe, expect, mock, it } from 'bun:test'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+
+import {
+  AudioPlayerStatus,
+  createAudioPlayer,
+  createAudioResource,
+  joinVoiceChannel,
+  StreamType,
+  VoiceConnectionStatus,
+} from '@discordjs/voice'
 
 import { DiscordBotListener } from '@/platforms/discordbot/listener'
 import { DiscordIntent } from '@/platforms/discordbot/types'
-import { DiscordVoiceError, joinVoice, voiceAdapter, type VoiceSeams } from '@/platforms/discordbot/voice'
-import { EventEmitter } from 'node:events'
-import { PassThrough } from 'node:stream'
-import type { AudioPlayer, AudioResource, VoiceConnection } from '@discordjs/voice'
 import type {
   DiscordGatewayGenericEvent,
   DiscordGatewayMessageCreateEvent,
   DiscordGatewayMessageDeleteEvent,
   DiscordGatewayMessageUpdateEvent,
   DiscordGatewayReactionEvent,
+  DiscordVoiceStateUpdate,
 } from '@/platforms/discordbot/types'
+import { DiscordVoiceError, joinVoice, voiceAdapter, type VoiceSeams } from '@/platforms/discordbot/voice'
 
 type WsHandler = (...args: any[]) => void
 
@@ -226,14 +235,21 @@ describe('DiscordBotListener', () => {
 
   describe('voice gateway', () => {
     const state = {
-      guild_id: 'G1', channel_id: 'C1', user_id: 'OWNER', session_id: 'VS1',
-      deaf: false, mute: false, self_deaf: false, self_mute: false,
-      self_video: false, suppress: false,
+      guild_id: 'G1',
+      channel_id: 'C1',
+      user_id: 'OWNER',
+      session_id: 'VS1',
+      deaf: false,
+      mute: false,
+      self_deaf: false,
+      self_mute: false,
+      self_video: false,
+      suppress: false,
     }
 
     it('identifies with the caller voice intent and emits parsed dispatch tuples', async () => {
       listener = new DiscordBotListener(createMockClient(), { intents: DiscordIntent.GuildVoiceStates })
-      const states: Array<[typeof state, number | null]> = []
+      const states: Array<[DiscordVoiceStateUpdate, number | null]> = []
       const servers: Array<{ token: string; guild_id: string; endpoint: string | null }> = []
       listener.on('voice_state_update', (event, sequence) => states.push([event, sequence]))
       listener.on('voice_server_update', (event) => servers.push(event))
@@ -290,7 +306,11 @@ describe('DiscordBotListener', () => {
     it('filters adapter updates and rejects foreign or closed sends', async () => {
       listener = new DiscordBotListener(createMockClient())
       await startAndReady(listener)
-      const methods = { destroy: mock(() => {}), onVoiceStateUpdate: mock(() => {}), onVoiceServerUpdate: mock(() => {}) }
+      const methods = {
+        destroy: mock(() => {}),
+        onVoiceStateUpdate: mock(() => {}),
+        onVoiceServerUpdate: mock(() => {}),
+      }
       const adapter = voiceAdapter(listener, 'G1', 'BOT_SELF')(methods)
       const own = { ...state, user_id: 'BOT_SELF' }
       mockWsInstance.simulateDispatch('VOICE_STATE_UPDATE', state, 6)
@@ -301,13 +321,19 @@ describe('DiscordBotListener', () => {
       expect(methods.onVoiceStateUpdate).toHaveBeenCalledTimes(1)
       expect(methods.onVoiceServerUpdate).toHaveBeenCalledTimes(1)
       expect(adapter.sendPayload({ op: 8, d: { guild_id: 'G1' } })).toBe(false)
-      expect(adapter.sendPayload({ op: 4, d: { guild_id: 'G2', channel_id: 'C1', self_mute: false, self_deaf: false } })).toBe(false)
-      expect(adapter.sendPayload({ op: 4, d: { guild_id: 'G1', channel_id: 'C1', self_mute: false, self_deaf: false } })).toBe(true)
+      expect(
+        adapter.sendPayload({ op: 4, d: { guild_id: 'G2', channel_id: 'C1', self_mute: false, self_deaf: false } }),
+      ).toBe(false)
+      expect(
+        adapter.sendPayload({ op: 4, d: { guild_id: 'G1', channel_id: 'C1', self_mute: false, self_deaf: false } }),
+      ).toBe(true)
       mockWsInstance.simulateClose()
       expect(methods.destroy).toHaveBeenCalledTimes(1)
       expect(listener.listenerCount('voice_state_update')).toBe(0)
       expect(listener.listenerCount('voice_server_update')).toBe(0)
-      expect(adapter.sendPayload({ op: 4, d: { guild_id: 'G1', channel_id: null, self_mute: false, self_deaf: false } })).toBe(false)
+      expect(
+        adapter.sendPayload({ op: 4, d: { guild_id: 'G1', channel_id: null, self_mute: false, self_deaf: false } }),
+      ).toBe(false)
       adapter.destroy()
       expect(methods.destroy).toHaveBeenCalledTimes(1)
     })
@@ -315,9 +341,17 @@ describe('DiscordBotListener', () => {
     it('destroys the adapter once before listener stop closes the socket', async () => {
       listener = new DiscordBotListener(createMockClient())
       await startAndReady(listener)
-      const destroy = mock(() => { expect(mockWsInstance.readyState).toBe(MockWs.OPEN) })
-      voiceAdapter(listener, 'G1', 'BOT_SELF')({
-        destroy, onVoiceStateUpdate: () => {}, onVoiceServerUpdate: () => {},
+      const destroy = mock(() => {
+        expect(mockWsInstance.readyState).toBe(MockWs.OPEN)
+      })
+      voiceAdapter(
+        listener,
+        'G1',
+        'BOT_SELF',
+      )({
+        destroy,
+        onVoiceStateUpdate: () => {},
+        onVoiceServerUpdate: () => {},
       })
       listener.stop()
       expect(destroy).toHaveBeenCalledTimes(1)
@@ -326,11 +360,15 @@ describe('DiscordBotListener', () => {
 
     it('refuses joins before READY, while busy, and when aborted', async () => {
       listener = new DiscordBotListener(createMockClient())
-      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' })).rejects.toMatchObject({ code: 'voice_not_ready' })
+      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' })).rejects.toMatchObject({
+        code: 'voice_not_ready',
+      })
       await startAndReady(listener)
       const abort = new AbortController()
       abort.abort()
-      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER', signal: abort.signal })).rejects.toMatchObject({ code: 'voice_aborted' })
+      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER', signal: abort.signal })).rejects.toMatchObject(
+        { code: 'voice_aborted' },
+      )
     })
 
     it('streams speaker PCM, backpressures output, reports departure, and leaves once', async () => {
@@ -338,32 +376,38 @@ describe('DiscordBotListener', () => {
       await startAndReady(listener)
       const opus = new PassThrough()
       const decoder = new PassThrough()
-      const unsubscribe = mock(() => {})
-      const stop = mock(() => true)
-      const player = { play: mock(() => {}), stop, on: mock(() => player) }
+      const player = createAudioPlayer()
       let playback: PassThrough | undefined
-      const connection = Object.assign(new EventEmitter(), {
-        state: { status: 'ready' },
-        receiver: { subscribe: mock(() => opus) },
-        subscribe: mock(() => ({ unsubscribe })),
-        destroy: mock(() => { connection.state.status = 'destroyed' }),
+      let connection: ReturnType<typeof joinVoiceChannel> | undefined
+      const joined = mock((options: Parameters<VoiceSeams['join']>[0]) => {
+        connection = joinVoiceChannel({ ...options, group: crypto.randomUUID() })
+        return connection
       })
-      const joined = mock(() => connection as VoiceConnection)
       const seams: VoiceSeams = {
         join: joined,
         ready: async () => {},
-        player: () => player as AudioPlayer,
-        resource: (stream) => { playback = stream as PassThrough; return {} as AudioResource },
-        receive: (conn, id) => conn.receiver.subscribe(id),
+        player: () => player,
+        resource: (stream) => {
+          if (!(stream instanceof PassThrough)) throw new Error('expected PCM stream')
+          playback = stream
+          return createAudioResource(new PassThrough(), { inputType: StreamType.Raw })
+        },
+        receive: () => opus,
         decoder: () => decoder,
       }
       const handle = await joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' }, seams)
       expect(joined.mock.calls[0]?.[0]).toMatchObject({
-        guildId: 'G1', channelId: 'C1', selfDeaf: false, selfMute: false, daveEncryption: true,
+        guildId: 'G1',
+        channelId: 'C1',
+        selfDeaf: false,
+        selfMute: false,
+        daveEncryption: true,
       })
       const nextEvent = handle.events[Symbol.asyncIterator]()
       expect(await nextEvent.next()).toEqual({ value: { type: 'ready' }, done: false })
-      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' }, seams)).rejects.toMatchObject({ code: 'voice_busy' })
+      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' }, seams)).rejects.toMatchObject({
+        code: 'voice_busy',
+      })
 
       const nextPcm = handle.pcmIn[Symbol.asyncIterator]().next()
       opus.write(Buffer.from([1, 2, 3, 4]))
@@ -373,22 +417,22 @@ describe('DiscordBotListener', () => {
 
       const pending = handle.pcmOut.write(Buffer.alloc(40_000))
       let drained = false
-      pending.then(() => { drained = true })
+      pending.then(() => {
+        drained = true
+      })
       expect(drained).toBe(false)
       expect(playback?.read()).toEqual(Buffer.alloc(40_000))
       await pending
       expect(drained).toBe(true)
 
       const interrupted = handle.pcmOut.write(Buffer.alloc(40_000))
-      connection.state.status = 'disconnected'
-      connection.emit('stateChange', { status: 'ready' }, { status: 'disconnected' })
+      connection?.emit('stateChange', { status: 'ready' }, { status: 'disconnected' })
       await expect(interrupted).rejects.toMatchObject({ code: 'voice_join_failed' })
       expect(await nextEvent.next()).toEqual({ value: { type: 'disconnected', reason: 'disconnected' }, done: false })
       await handle.leave()
       await handle.leave()
-      expect(connection.destroy).toHaveBeenCalledTimes(1)
-      expect(unsubscribe).toHaveBeenCalledTimes(1)
-      expect(stop).toHaveBeenCalledTimes(1)
+      expect(connection?.state.status).toBe(VoiceConnectionStatus.Destroyed)
+      expect(player.state.status).toBe(AudioPlayerStatus.Idle)
       await expect(handle.pcmOut.write(Buffer.from([0, 0, 0, 0]))).rejects.toBeInstanceOf(DiscordVoiceError)
       expect(listener.listenerCount('voice_state_update')).toBe(0)
     })
@@ -396,28 +440,40 @@ describe('DiscordBotListener', () => {
     it('loads the real seam lazily and closes on decoder failure', async () => {
       listener = new DiscordBotListener(createMockClient())
       await startAndReady(listener)
+      const originalVoice = { ...(await import('@discordjs/voice')) }
+      const originalPrism = { ...(await import('prism-media')) }
       const opus = new PassThrough()
       const decoder = new PassThrough()
       const connection = Object.assign(new EventEmitter(), {
         state: { status: 'ready' },
         receiver: { subscribe: mock(() => opus) },
         subscribe: () => ({ unsubscribe: () => {} }),
-        destroy: () => { connection.state.status = 'destroyed' },
+        destroy: () => {
+          connection.state.status = 'destroyed'
+        },
       })
       const resource = mock((_stream: PassThrough, _options: object) => ({}))
       mock.module('@discordjs/voice', () => ({
         joinVoiceChannel: () => connection,
         entersState: async () => connection,
         VoiceConnectionStatus: { Ready: 'ready' },
+        AudioPlayerStatus: { Idle: 'idle' },
         EndBehaviorType: { Manual: 0 },
         StreamType: { Raw: 'raw' },
         createAudioPlayer: () => ({ play: () => {}, stop: () => {}, on: () => {} }),
         createAudioResource: resource,
       }))
       mock.module('prism-media', () => ({
-        default: { opus: { Decoder: class extends PassThrough {
-          constructor(_opts: { rate: number; channels: number; frameSize: number }) { super(); return decoder }
-        } } },
+        default: {
+          opus: {
+            Decoder: class extends PassThrough {
+              constructor(_opts: { rate: number; channels: number; frameSize: number }) {
+                super()
+                return decoder
+              }
+            },
+          },
+        },
       }))
       const handle = await joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' })
       const events = handle.events[Symbol.asyncIterator]()
@@ -428,32 +484,50 @@ describe('DiscordBotListener', () => {
       expect(await events.next()).toEqual({ value: { type: 'error', reason: 'bad packet' }, done: false })
       expect(await events.next()).toEqual({ value: { type: 'disconnected', reason: 'error' }, done: false })
       await expect(handle.pcmOut.write(Buffer.alloc(4))).rejects.toMatchObject({ code: 'voice_join_failed' })
+      mock.module('@discordjs/voice', () => originalVoice)
+      mock.module('prism-media', () => originalPrism)
     })
 
     it('maps failed readiness and an aborted pending join to typed refusals', async () => {
       listener = new DiscordBotListener(createMockClient())
       await startAndReady(listener)
-      const connection = Object.assign(new EventEmitter(), {
-        state: { status: 'signalling' },
-        receiver: { subscribe: () => new PassThrough() },
-        subscribe: () => undefined,
-        destroy: mock(() => { connection.state.status = 'destroyed' }),
-      })
+      let connection: ReturnType<typeof joinVoiceChannel> | undefined
       const failed: VoiceSeams = {
-        join: () => connection as VoiceConnection,
-        ready: async () => { throw new Error('handshake failed') },
-        player: () => { throw new Error('unexpected') },
-        resource: () => { throw new Error('unexpected') },
-        receive: () => { throw new Error('unexpected') },
-        decoder: () => { throw new Error('unexpected') },
+        join: (options) => {
+          connection = joinVoiceChannel({ ...options, group: crypto.randomUUID() })
+          return connection
+        },
+        ready: async () => {
+          throw new Error('handshake failed')
+        },
+        player: () => {
+          throw new Error('unexpected')
+        },
+        resource: () => {
+          throw new Error('unexpected')
+        },
+        receive: () => {
+          throw new Error('unexpected')
+        },
+        decoder: () => {
+          throw new Error('unexpected')
+        },
       }
-      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' }, failed)).rejects.toMatchObject({ code: 'voice_join_failed' })
-      expect(connection.destroy).toHaveBeenCalledTimes(1)
+      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER' }, failed)).rejects.toMatchObject({
+        code: 'voice_join_failed',
+      })
+      expect(connection?.state.status).toBe(VoiceConnectionStatus.Destroyed)
       const abort = new AbortController()
-      const aborted = { ...failed, ready: async () => { abort.abort(); throw new Error('aborted') } }
-      connection.state.status = 'signalling'
-      await expect(joinVoice('G1', 'C1', { listener, speakerId: 'OWNER', signal: abort.signal }, aborted))
-        .rejects.toMatchObject({ code: 'voice_aborted' })
+      const aborted = {
+        ...failed,
+        ready: async () => {
+          abort.abort()
+          throw new Error('aborted')
+        },
+      }
+      await expect(
+        joinVoice('G1', 'C1', { listener, speakerId: 'OWNER', signal: abort.signal }, aborted),
+      ).rejects.toMatchObject({ code: 'voice_aborted' })
     })
   })
 
