@@ -286,6 +286,35 @@ export interface SlackRTMGenericEvent {
   [key: string]: unknown
 }
 
+export const SlackHuddleChangedSchema = z.object({
+  type: z.literal('user_huddle_changed'),
+  user: z.object({
+    id: z.string().min(1),
+    team_id: z.string().min(1),
+    profile: z.object({
+      huddle_state: z.string(),
+      huddle_state_call_id: z.string().min(1).nullable().optional(),
+      huddle_state_expiration_ts: z.number().finite().optional(),
+    }),
+  }),
+  event_ts: z.string().regex(/^\d+\.\d+$/),
+})
+
+export const SlackHuddleRoomJoinedSchema = z.object({
+  type: z.literal('sh_room_join'),
+  user: z.string().min(1),
+  room: z.object({
+    id: z.string().min(1),
+    has_ended: z.boolean(),
+    participants: z.array(z.string().min(1)).readonly(),
+  }),
+  huddle: z.object({ channel_id: z.string().min(1) }),
+  event_ts: z.string().regex(/^\d+\.\d+$/),
+})
+
+export type SlackHuddleChanged = z.infer<typeof SlackHuddleChangedSchema>
+export type SlackHuddleRoomJoined = z.infer<typeof SlackHuddleRoomJoinedSchema>
+
 export type SlackRTMEvent =
   | SlackRTMMessageEvent
   | SlackRTMReactionEvent
@@ -296,6 +325,8 @@ export type SlackRTMEvent =
   | SlackRTMGenericEvent
 
 export interface SlackListenerEventMap {
+  user_huddle_changed: [event: SlackHuddleChanged]
+  sh_room_join: [event: SlackHuddleRoomJoined]
   message: [event: SlackRTMMessageEvent]
   reaction_added: [event: SlackRTMReactionEvent]
   reaction_removed: [event: SlackRTMReactionEvent]

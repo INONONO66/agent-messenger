@@ -32,7 +32,7 @@ class MockWs {
 
   close() {
     this.readyState = MockWs.CLOSED
-    setTimeout(() => this.emit('close'), 0)
+    queueMicrotask(() => this.emit('close'))
   }
 
   emit(event: string, ...args: any[]) {
@@ -214,14 +214,25 @@ describe('SlackListener', () => {
 
       listener.stop()
 
-      await new Promise((r) => setTimeout(r, 50))
       expect(client.rtmConnect).toHaveBeenCalledTimes(1)
     })
   })
 
   describe('reconnection', () => {
     it('reconnects on WebSocket close when still running', async () => {
-      const client = createMockClient()
+      const reconnect = Promise.withResolvers<void>()
+      let attempts = 0
+      const client = createMockClient({
+        rtmConnect: mock(async () => {
+          if (++attempts === 2) reconnect.resolve()
+          return {
+            url: 'wss://fake.slack.com/ws',
+            cookie: 'fake-cookie',
+            self: { id: 'U_SELF' },
+            team: { id: 'T_TEAM' },
+          }
+        }),
+      })
       listener = new SlackListener(client)
 
       const disconnected: boolean[] = []
@@ -233,16 +244,18 @@ describe('SlackListener', () => {
 
       expect(disconnected.length).toBe(1)
 
-      await new Promise((r) => setTimeout(r, 1500))
-      expect(client.rtmConnect.mock.calls.length).toBeGreaterThanOrEqual(2)
+      await reconnect.promise
+      expect(client.rtmConnect.mock.calls.length).toBe(2)
     })
 
     it('emits error and reconnects on rtmConnect failure', async () => {
       let callCount = 0
+      const reconnect = Promise.withResolvers<void>()
       const client = createMockClient({
         rtmConnect: mock(() => {
           callCount++
           if (callCount === 1) return Promise.reject(new Error('network_error'))
+          reconnect.resolve()
           return Promise.resolve({
             url: 'wss://fake.slack.com/ws',
             cookie: 'fake-cookie',
@@ -259,11 +272,11 @@ describe('SlackListener', () => {
 
       await listener.start()
 
-      await new Promise((r) => setTimeout(r, 1500))
+      await reconnect.promise
 
       expect(errors.length).toBe(1)
       expect(errors[0].message).toBe('network_error')
-      expect(client.rtmConnect.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(client.rtmConnect.mock.calls.length).toBe(2)
     })
   })
 
@@ -366,6 +379,47 @@ describe('SlackListener', () => {
 
       await listener.start()
       expect((listener as any).reconnectAttempts).toBe(0)
+    })
+  })
+
+  it('parses huddle projections but preserves malformed payloads only on the generic path', async () => {
+    listener = new SlackListener(createMockClient())
+    const typed: object[] = []
+    const generic: object[] = []
+    listener.on('user_huddle_changed', (event) => typed.push(event))
+    listener.on('sh_room_join', (event) => typed.push(event))
+    listener.on('slack_event', (event) => generic.push(event))
+    await listener.start()
+    const official = {
+      type: 'user_huddle_changed',
+      user: {
+        id: 'U1',
+        team_id: 'T1',
+        profile: { huddle_state: 'in_a_huddle', huddle_state_call_id: 'R1', huddle_state_expiration_ts: 1746217265 },
+      },
+      event_ts: '1746217200.000001',
+    }
+    mockWsInstance.simulateMessage(official)
+    mockWsInstance.simulateMessage({
+      type: 'sh_room_join',
+      user: 'U1',
+      event_ts: '1746217200.000001',
+      room: { id: 'R1', has_ended: false, participants: ['U1'], channels: [] },
+      huddle: { channel_id: 'C1' },
+    })
+    mockWsInstance.simulateMessage({ ...official, event_ts: 123 })
+    mockWsInstance.simulateMessage({ ...official, user: { id: 'U1' } })
+    mockWsInstance.simulateMessage({ ...official, type: 'user_change' })
+    mockWsInstance.simulateMessage({ type: 'sh_room_join', room: { id: 'R1', channels: [] } })
+    expect(typed).toHaveLength(2)
+    expect(generic).toHaveLength(6)
+    expect(typed[0]).toEqual(official)
+    expect(typed[1]).toEqual({
+      type: 'sh_room_join',
+      user: 'U1',
+      event_ts: '1746217200.000001',
+      room: { id: 'R1', has_ended: false, participants: ['U1'] },
+      huddle: { channel_id: 'C1' },
     })
   })
 })

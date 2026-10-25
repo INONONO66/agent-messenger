@@ -29,6 +29,15 @@
     "agent-whatsappbot": "./src/platforms/whatsappbot/cli.ts",
     "amsg": "./src/cli.ts"
   },
+  "files": [
+    "dist/",
+    "src/",
+    "scripts/",
+    "skills/",
+    "docs/",
+    "examples/",
+    ".claude-plugin/"
+  ],
   "type": "module",
   "main": "dist/cli.js",
   "module": "dist/cli.js",
