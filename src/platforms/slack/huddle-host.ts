@@ -1,3 +1,4 @@
+import type { Serializable } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
@@ -16,9 +17,10 @@ import {
 import { PCM_LIMIT } from './huddle-pcm'
 import { HuddleProcesses } from './huddle-process'
 
+/** Commands are parsed once at the channel; `undefined` marks a packet outside the host protocol. */
 export interface HuddleHostChannel {
   send(message: HuddleReply): void
-  subscribe(message: (value: unknown) => void, disconnected: () => void): () => void
+  subscribe(message: (command: HuddleCommand | undefined) => void, disconnected: () => void): () => void
   finish(): void
 }
 
@@ -119,6 +121,9 @@ export function runHuddleHost(
         { processes: browserProcesses, connect: dependencies.connect },
       )
       if (abort.signal.aborted || stopping) return
+      // Capture opens only after admission and the post-unmute check, so no earlier audio exists.
+      await activeAudio.startCapture()
+      if (stopping) return
       ready = true
       send({ type: 'ready' })
       const activeBrowser = browser
@@ -142,13 +147,11 @@ export function runHuddleHost(
     }
   }
   const unsubscribe = channel.subscribe(
-    (value) => {
-      const parsed = HuddleCommand.safeParse(value)
-      if (!parsed.success) {
+    (command) => {
+      if (!command) {
         terminal({ type: 'error', reason: 'host_protocol_invalid' })
         return
       }
-      const command = parsed.data
       switch (command.type) {
         case 'start':
           if (starting || stopping) {
@@ -195,12 +198,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.send) {
       })
     },
     subscribe(message, disconnected) {
-      process.on('message', message)
+      const receive = (value: Serializable) => message(HuddleCommand.safeParse(value).data)
+      process.on('message', receive)
       process.once('disconnect', disconnected)
       process.once('SIGTERM', disconnected)
       process.once('SIGINT', disconnected)
       return () => {
-        process.off('message', message)
+        process.off('message', receive)
         process.off('disconnect', disconnected)
         process.off('SIGTERM', disconnected)
         process.off('SIGINT', disconnected)

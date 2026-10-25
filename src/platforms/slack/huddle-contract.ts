@@ -30,7 +30,7 @@ export class SlackHuddleError extends Error {
   }
 }
 
-export const HuddleStart = z.object({
+export const HuddleRequest = z.object({
   type: z.literal('start'),
   workspaceId: z.string().regex(/^T[A-Z0-9]+$/),
   channelId: z.string().regex(/^[CDG][A-Z0-9]+$/),
@@ -38,6 +38,9 @@ export const HuddleStart = z.object({
   seatId: z.string().regex(/^[UW][A-Z0-9]+$/),
   credentials: z.object({ token: z.string().startsWith('xoxc-'), cookie: z.string().min(1) }),
 })
+export type HuddleRequest = z.infer<typeof HuddleRequest>
+/** The parent owns the browser profile; the host uses this path and never chooses its own. */
+export const HuddleStart = HuddleRequest.extend({ profile: z.string().min(1) })
 export type HuddleStart = z.infer<typeof HuddleStart>
 const bytes = z
   .string()
@@ -49,6 +52,7 @@ export const HuddleCommand = z.discriminatedUnion('type', [
   z.object({ type: z.literal('consumed'), bytes: z.number().int().nonnegative().max(38_400) }),
   z.object({ type: z.literal('leave') }),
 ])
+export type HuddleCommand = z.infer<typeof HuddleCommand>
 export const HuddleReply = z.discriminatedUnion('type', [
   z.object({ type: z.literal('owned_process'), pid: z.number().int().positive() }),
   z.object({ type: z.literal('released_process'), pid: z.number().int().positive() }),
@@ -65,6 +69,15 @@ export const HuddleReply = z.discriminatedUnion('type', [
   z.object({ type: z.literal('left'), error: z.string().optional() }),
 ])
 export type HuddleReply = z.infer<typeof HuddleReply>
+/** JSON text from a page or socket; pipe it into the schema of the value it must carry. */
+export const JsonText = z.string().transform((text, context) => {
+  try {
+    return z.json().parse(JSON.parse(text))
+  } catch {
+    context.addIssue({ code: 'custom', message: 'invalid JSON' })
+    return z.NEVER
+  }
+})
 
 export interface HuddleClock {
   after(ms: number, action: () => void): () => void
@@ -76,7 +89,7 @@ export const huddleClock: HuddleClock = {
   },
 }
 
-export function huddleFailure(error: unknown, detail = 'host_failed'): SlackHuddleError {
+export function huddleFailure<Failure>(error: Failure, detail = 'host_failed'): SlackHuddleError {
   return error instanceof SlackHuddleError ? error : new SlackHuddleError('voice_join_failed', detail)
 }
 

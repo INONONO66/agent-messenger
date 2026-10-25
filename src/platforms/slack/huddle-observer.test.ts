@@ -65,7 +65,9 @@ it('mute changes do not depart but an absent previously present peer does', () =
 
 it('rejects malformed state and room changes instead of guessing', () => {
   const observed = new HuddleObserver(start, () => {})
-  expect(() => observed.page({})).toThrow(new SlackHuddleError('voice_join_failed', 'page_state_invalid'))
+  expect(() => observed.cdp('Runtime.bindingCalled', { name: 'huddleState', payload: '{}' })).toThrow(
+    new SlackHuddleError('voice_join_failed', 'page_state_invalid'),
+  )
   expect(() => observed.admission()).toThrow(new SlackHuddleError('voice_join_failed', 'selector_missing'))
   observed.wire({ ...room, huddle: { channel_id: 'C2' } })
   expect(observed.room).toBeUndefined()

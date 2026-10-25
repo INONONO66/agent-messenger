@@ -10,6 +10,8 @@ export interface HuddleProcess {
   readonly output: Readable
   readonly errors: Readable
   readonly exited: Promise<{ readonly code: number | null; readonly signal: string | null }>
+  /** Settles true on the child's `spawn` event and false on a spawn `error`. */
+  readonly spawned: Promise<boolean>
   kill(): void
 }
 
@@ -33,6 +35,10 @@ export const spawnHuddleProcess: HuddleSpawn = (command, args, env) => {
       if (error && process.connected) process.disconnect()
     })
   }
+  const spawned = new Promise<boolean>((resolve) => {
+    child.once('spawn', () => resolve(true))
+    child.once('error', () => resolve(false))
+  })
   const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
     child.once('error', () => resolve({ code: -1, signal: null }))
     child.once('close', (code, signal) => {
@@ -50,6 +56,7 @@ export const spawnHuddleProcess: HuddleSpawn = (command, args, env) => {
     output: child.stdout,
     errors: child.stderr,
     exited,
+    spawned,
     kill,
   }
 }

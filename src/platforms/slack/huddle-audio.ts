@@ -112,7 +112,6 @@ export async function createHuddleAudio(
     activePlayback.input.on('error', () => fault('pcm_transport_failed'))
     activePlayback.errors.resume()
     void activePlayback.exited.then(() => fault('audio_process_exit'))
-    const capture = processes.open('parec', ['--record', ...raw, `--device=${devices.receive}.monitor`, ...latency])
     let playEnd = clock.now()
     const output = new HuddleWriter(
       async (pcm) => {
@@ -126,28 +125,39 @@ export async function createHuddleAudio(
       (error) => fault(error.detail),
     )
     writer = output
-    capture.errors.resume()
-    void capture.exited.then(() => fault('audio_process_exit'))
-    capture.output.on('data', (data: Buffer) => {
+    // Capture opens only after admission, so nothing heard before readiness can reach pcmIn.
+    const startCapture = async () => {
+      let capture: ReturnType<HuddleProcesses['open']>
       try {
-        frames.push(data)
-      } catch (error) {
-        fault(huddleFailure(error).detail)
+        capture = processes.open('parec', ['--record', ...raw, `--device=${devices.receive}.monitor`, ...latency])
+      } catch {
+        throw new SlackHuddleError('voice_join_failed', 'capture_failed')
       }
-    })
-    capture.output.on('error', () => fault('pcm_transport_failed'))
-    capture.output.on('end', () => {
-      try {
-        frames.end()
-        fault('pcm_eof')
-      } catch (error) {
-        fault(huddleFailure(error).detail)
-      }
-    })
+      capture.errors.resume()
+      if (!(await capture.spawned)) throw new SlackHuddleError('voice_join_failed', 'capture_failed')
+      void capture.exited.then(() => fault('audio_process_exit'))
+      capture.output.on('data', (data: Buffer) => {
+        try {
+          frames.push(data)
+        } catch (error) {
+          fault(huddleFailure(error).detail)
+        }
+      })
+      capture.output.on('error', () => fault('pcm_transport_failed'))
+      capture.output.on('end', () => {
+        try {
+          frames.end()
+          fault('pcm_eof')
+        } catch (error) {
+          fault(huddleFailure(error).detail)
+        }
+      })
+    }
     return {
       devices,
       pcmIn: frames,
       write: (pcm: Uint8Array) => output.write(pcm),
+      startCapture,
       close,
       async verifyRoutes(): Promise<void> {
         const [sinks, sources, inputs, outputs] = await Promise.all([
@@ -158,9 +168,10 @@ export async function createHuddleAudio(
         ])
         const receive = Devices.parse(JSON.parse(sinks)).find((device) => device.name === devices.receive)
         const microphone = Devices.parse(JSON.parse(sources)).find((device) => device.name === devices.microphone)
-        const belongs = (properties: Record<string, unknown>) => properties['application.name'] === `huddle_${key}`
-        const render = Streams.parse(JSON.parse(inputs)).filter((stream) => belongs(stream.properties))
-        const record = Streams.parse(JSON.parse(outputs)).filter((stream) => belongs(stream.properties))
+        const belongs = (stream: z.infer<typeof Streams>[number]) =>
+          stream.properties['application.name'] === `huddle_${key}`
+        const render = Streams.parse(JSON.parse(inputs)).filter(belongs)
+        const record = Streams.parse(JSON.parse(outputs)).filter(belongs)
         if (
           !receive ||
           !microphone ||

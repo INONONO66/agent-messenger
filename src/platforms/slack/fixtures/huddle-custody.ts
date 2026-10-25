@@ -1,3 +1,6 @@
+import type { Serializable } from 'node:child_process'
+
+import { HuddleCommand } from '../huddle-contract'
 import { runHuddleHost } from '../huddle-host'
 import { HuddleProcesses, spawnHuddleProcess, type HuddleSpawn } from '../huddle-process'
 
@@ -26,10 +29,11 @@ runHuddleHost(
       process.send?.(message)
     },
     subscribe(message, disconnected) {
-      process.on('message', message)
+      const receive = (value: Serializable) => message(HuddleCommand.safeParse(value).data)
+      process.on('message', receive)
       process.once('disconnect', disconnected)
       return () => {
-        process.off('message', message)
+        process.off('message', receive)
         process.off('disconnect', disconnected)
       }
     },

@@ -126,10 +126,11 @@ it('process exit aborts a pending endpoint discovery', async () => {
 
 it('refuses oversized browser debug output before accepting a CDP endpoint', async () => {
   const f = fixture()
-  const opened = f.external.next('chromium')
   const joining = f.open()
-  const child = await opened
-  child.errors.write(Buffer.from('untrusted'.repeat(1_025)))
+  // The browser launches synchronously, so this lands before the stand-in endpoint line.
+  f.external.calls
+    .find((call) => call.command === 'chromium')
+    ?.child.errors.write(Buffer.from('untrusted'.repeat(1_025)))
   await expect(joining).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'cdp_address_invalid'))
   expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
 })
@@ -179,4 +180,26 @@ it('ignores unrelated browser diagnostics before the CDP address', async () => {
   const browser = await joining
   await browser.close()
   expect(f.wire.closed).toBe(true)
+})
+
+it('a third peer joining while the unmute is pending refuses readiness', async () => {
+  const f = fixture()
+  f.wire.holdClick = huddleSelectors.microphone
+  const held = f.wire.next('held')
+  const joining = f.open().catch((error) => error)
+  await held
+  f.wire.state.peers = ['U1', 'U2', 'U3']
+  f.wire.page()
+  f.wire.release()
+  expect(await joining).toEqual(new SlackHuddleError('voice_join_failed', 'speaker_not_isolated'))
+  expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
+})
+
+it('an abort during endpoint discovery refuses before any CDP connection', async () => {
+  const f = fixture()
+  const joining = f.open()
+  f.abort.abort()
+  await expect(joining).rejects.toBeInstanceOf(SlackHuddleError)
+  expect(f.wire.requests).toEqual([])
+  expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
 })
