@@ -79,38 +79,81 @@ export function sendTopic(threadId) {
             throw new Error('Invalid Telegram thread identifier');
     }
 }
-export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map(), userIsBot) {
-    const result = Message.safeParse(raw);
-    if (!result.success)
-        return undefined;
-    const message = result.data;
-    const content = message.content;
-    const typed = z
-        .object({
-        text: Formatted.optional(),
-        caption: Formatted.optional(),
-        photo: z.object({ sizes: z.array(z.object({ photo: File, width: z.number(), height: z.number() })) }).optional(),
-        audio: z
-            .object({ audio: File, file_name: z.string(), mime_type: z.string(), duration: z.number().optional() })
-            .optional(),
-        voice_note: z.object({ voice: File, mime_type: z.string() }).optional(),
-        video: z.object({ video: File, file_name: z.string(), mime_type: z.string() }).optional(),
-        document: z.object({ document: File, file_name: z.string(), mime_type: z.string() }).optional(),
-    })
-        .safeParse(content);
-    if (!typed.success)
-        return undefined;
-    const body = typed.data;
-    const formatted = content['@type'] === 'messageText' ? body.text : body.caption;
-    if (content['@type'] === 'messageText' && !formatted)
-        return undefined;
-    const mentions = (formatted?.entities ?? [])
+const Content = z.object({
+    text: Formatted.optional(),
+    caption: Formatted.optional(),
+    photo: z.object({ sizes: z.array(z.object({ photo: File, width: z.number(), height: z.number() })) }).optional(),
+    audio: z
+        .object({ audio: File, file_name: z.string(), mime_type: z.string(), duration: z.number().optional() })
+        .optional(),
+    voice_note: z.object({ voice: File, mime_type: z.string() }).optional(),
+    video: z.object({ video: File, file_name: z.string(), mime_type: z.string() }).optional(),
+    document: z.object({ document: File, file_name: z.string(), mime_type: z.string() }).optional(),
+});
+const MEDIA = new Map([
+    [
+        'messagePhoto',
+        ({ photo }) => {
+            if (!photo?.sizes.length)
+                return undefined;
+            const largest = photo.sizes.reduce((a, b) => (a.photo.size >= b.photo.size ? a : b));
+            return { kind: 'image', fileId: largest.photo.id, name: '', mime: 'image/jpeg', size: largest.photo.size };
+        },
+    ],
+    [
+        'messageAudio',
+        ({ audio }) => audio && {
+            kind: 'audio',
+            fileId: audio.audio.id,
+            name: audio.file_name,
+            mime: audio.mime_type,
+            size: audio.audio.size,
+        },
+    ],
+    [
+        'messageVoiceNote',
+        ({ voice_note: note }) => note && {
+            kind: 'audio',
+            fileId: note.voice.id,
+            name: '',
+            mime: note.mime_type,
+            size: note.voice.size,
+            voice: true,
+        },
+    ],
+    [
+        'messageVideo',
+        ({ video }) => video && {
+            kind: 'video',
+            fileId: video.video.id,
+            name: video.file_name,
+            mime: video.mime_type,
+            size: video.video.size,
+        },
+    ],
+    [
+        'messageDocument',
+        ({ document: doc }) => doc && {
+            kind: 'file',
+            fileId: doc.document.id,
+            name: doc.file_name,
+            mime: doc.mime_type,
+            size: doc.document.size,
+        },
+    ],
+]);
+const TOPICS = new Map([
+    ['messageTopicForum', ['forum', 'forum_topic_id']],
+    ['messageTopicThread', ['thread', 'message_thread_id']],
+    ['messageTopicDirectMessages', ['direct', 'direct_messages_chat_topic_id']],
+    ['messageTopicSavedMessages', ['saved', 'saved_messages_topic_id']],
+]);
+function mentionIds(formatted, resolvedUsernames) {
+    const mentions = formatted.entities
         .filter((entity) => entity.type['@type'] === 'textEntityTypeMentionName' && entity.type.user_id !== undefined)
         .map((entity) => String(entity.type.user_id));
-    for (const entity of formatted?.entities ?? []) {
+    for (const entity of formatted.entities) {
         if (entity.type['@type'] !== 'textEntityTypeMention' || entity.offset === undefined || entity.length === undefined)
-            continue;
-        if (!formatted)
             continue;
         const username = formatted.text
             .slice(entity.offset, entity.offset + entity.length)
@@ -120,101 +163,64 @@ export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map()
         if (userId && !mentions.includes(userId))
             mentions.push(userId);
     }
-    const media = [];
-    switch (content['@type']) {
-        case 'messageText':
-            break;
-        case 'messagePhoto': {
-            if (!body.photo?.sizes.length)
-                return undefined;
-            const largest = body.photo.sizes.reduce((a, b) => (a.photo.size >= b.photo.size ? a : b));
-            media.push({ kind: 'image', fileId: largest.photo.id, name: '', mime: 'image/jpeg', size: largest.photo.size });
-            break;
-        }
-        case 'messageAudio':
-            if (!body.audio)
-                return undefined;
-            media.push({
-                kind: 'audio',
-                fileId: body.audio.audio.id,
-                name: body.audio.file_name,
-                mime: body.audio.mime_type,
-                size: body.audio.audio.size,
-            });
-            break;
-        case 'messageVoiceNote':
-            if (!body.voice_note)
-                return undefined;
-            media.push({
-                kind: 'audio',
-                fileId: body.voice_note.voice.id,
-                name: '',
-                mime: body.voice_note.mime_type,
-                size: body.voice_note.voice.size,
-                voice: true,
-            });
-            break;
-        case 'messageVideo':
-            if (!body.video)
-                return undefined;
-            media.push({
-                kind: 'video',
-                fileId: body.video.video.id,
-                name: body.video.file_name,
-                mime: body.video.mime_type,
-                size: body.video.video.size,
-            });
-            break;
-        case 'messageDocument':
-            if (!body.document)
-                return undefined;
-            media.push({
-                kind: 'file',
-                fileId: body.document.document.id,
-                name: body.document.file_name,
-                mime: body.document.mime_type,
-                size: body.document.document.size,
-            });
-            break;
-        default:
-            break;
-    }
-    const sender = message.sender_id['@type'] === 'messageSenderUser' &&
-        message.sender_id.user_id !== undefined &&
-        userIsBot !== undefined
-        ? { kind: 'user', id: String(message.sender_id.user_id), isBot: userIsBot }
-        : message.sender_id['@type'] === 'messageSenderChat' && message.sender_id.chat_id !== undefined
-            ? { kind: 'chat', id: String(message.sender_id.chat_id) }
-            : undefined;
-    if (!sender)
+    return mentions;
+}
+// Content kinds without downloadable media carry none; a media kind missing its payload is malformed.
+function mediaOf(type, body) {
+    const extract = MEDIA.get(type);
+    if (!extract)
+        return [];
+    const item = extract(body);
+    return item ? [item] : undefined;
+}
+function senderOf(sender, userIsBot) {
+    if (sender['@type'] === 'messageSenderUser' && sender.user_id !== undefined && userIsBot !== undefined)
+        return { kind: 'user', id: String(sender.user_id), isBot: userIsBot };
+    if (sender['@type'] === 'messageSenderChat' && sender.chat_id !== undefined)
+        return { kind: 'chat', id: String(sender.chat_id) };
+    return undefined;
+}
+function botThread(type, value) {
+    if (type === 'messageTopicForum')
+        return value === 1 ? {} : { botThreadId: String(value) };
+    const id = type === 'messageTopicThread' ? botMessageId(value) : undefined;
+    return id ? { botThreadId: id } : {};
+}
+function threadOf(topic) {
+    if (!topic)
+        return {};
+    const entry = TOPICS.get(topic['@type']);
+    const value = entry && topic[entry[1]];
+    if (!entry || value === undefined)
         return undefined;
-    const topic = message.topic_id;
-    const topicValue = topic?.['@type'] === 'messageTopicForum'
-        ? topic.forum_topic_id
-        : topic?.['@type'] === 'messageTopicThread'
-            ? topic.message_thread_id
-            : topic?.['@type'] === 'messageTopicDirectMessages'
-                ? topic.direct_messages_chat_topic_id
-                : topic?.['@type'] === 'messageTopicSavedMessages'
-                    ? topic.saved_messages_topic_id
-                    : undefined;
-    const topicPrefix = topic?.['@type'] === 'messageTopicForum'
-        ? 'forum'
-        : topic?.['@type'] === 'messageTopicThread'
-            ? 'thread'
-            : topic?.['@type'] === 'messageTopicDirectMessages'
-                ? 'direct'
-                : topic?.['@type'] === 'messageTopicSavedMessages'
-                    ? 'saved'
-                    : undefined;
-    if (topic && (!topicPrefix || topicValue === undefined))
-        return undefined;
+    return { threadId: `${entry[0]}:${value}`, ...botThread(topic['@type'], value) };
+}
+function replyOf(message) {
     const reply = message.reply_to;
-    const sharedReply = reply?.message_id !== undefined &&
-        (reply['@type'] === undefined || reply['@type'] === 'messageReplyToMessage') &&
+    if (reply?.message_id === undefined)
+        return {};
+    const shared = (reply['@type'] === undefined || reply['@type'] === 'messageReplyToMessage') &&
         (reply.chat_id === undefined || String(reply.chat_id) === String(message.chat_id)) &&
         reply.origin == null;
-    const botReply = sharedReply && reply?.message_id !== undefined ? botMessageId(reply.message_id) : undefined;
+    const bot = shared ? botMessageId(reply.message_id) : undefined;
+    return { replyToMessageId: String(reply.message_id), ...(bot && { botReplyToMessageId: bot }) };
+}
+export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map(), userIsBot) {
+    const result = Message.safeParse(raw);
+    const typed = Content.safeParse(result.data?.content);
+    if (!result.success || !typed.success)
+        return undefined;
+    const message = result.data;
+    const type = message.content['@type'];
+    const formatted = type === 'messageText' ? typed.data.text : typed.data.caption;
+    if (type === 'messageText' && !formatted)
+        return undefined;
+    const media = mediaOf(type, typed.data);
+    const sender = senderOf(message.sender_id, userIsBot);
+    const thread = threadOf(message.topic_id);
+    if (!media || !sender || !thread)
+        return undefined;
+    const bot = botMessageId(message.id);
     return {
         chatId: String(message.chat_id),
         messageId: String(message.id),
@@ -224,18 +230,11 @@ export function parseAccountMessage(raw, chatType, resolvedUsernames = new Map()
         text: formatted?.text ?? '',
         dateSeconds: message.date,
         dm: chatType === 'chatTypePrivate' || chatType === 'chatTypeSecret',
-        mentionedUserIds: mentions,
+        mentionedUserIds: formatted ? mentionIds(formatted, resolvedUsernames) : [],
         media,
-        ...(reply?.message_id !== undefined && { replyToMessageId: String(reply.message_id) }),
-        ...(botMessageId(message.id) && { botMessageId: botMessageId(message.id) }),
-        ...(botReply && { botReplyToMessageId: botReply }),
-        ...(topicPrefix && topicValue !== undefined && { threadId: `${topicPrefix}:${topicValue}` }),
-        ...(topic?.['@type'] === 'messageTopicForum' && topicValue !== 1 && { botThreadId: String(topicValue) }),
-        ...(topic?.['@type'] === 'messageTopicThread' &&
-            topicValue !== undefined &&
-            botMessageId(topicValue) && {
-            botThreadId: botMessageId(topicValue),
-        }),
+        ...replyOf(message),
+        ...(bot && { botMessageId: bot }),
+        ...thread,
     };
 }
 //# sourceMappingURL=account-message.js.map

@@ -26,6 +26,9 @@ export declare class TdReceiver {
     on(clientId: number, handler: (event: TdEvent) => void): () => void;
     request(clientId: number, query: Record<string, unknown>, timeoutMs?: number): Promise<TdEvent>;
     private start;
+    private wanted;
+    private dispatch;
+    private fail;
     private pump;
 }
 export {};
