@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { z } from 'zod'
 
-import { huddleClock, SlackHuddleError, type HuddleClock } from './huddle-contract'
+import { huddleClock, JsonText, SlackHuddleError, type HuddleClock } from './huddle-contract'
 
 export interface CdpWire {
   readonly opened: Promise<void>
@@ -37,20 +37,25 @@ export function connectCdp(url: string): CdpWire {
   }
 }
 
-const Packet = z.union([
-  z.object({ id: z.number().int(), result: z.record(z.string(), z.unknown()), sessionId: z.string().optional() }),
-  z.object({ id: z.number().int(), error: z.object({ code: z.number(), message: z.string() }) }),
-  z.object({ method: z.string(), params: z.record(z.string(), z.unknown()), sessionId: z.string().optional() }),
-])
+const Fields = z.record(z.string(), z.json())
+export type CdpFields = z.infer<typeof Fields>
+const Packet = JsonText.pipe(
+  z.union([
+    z.object({ id: z.number().int(), result: Fields, sessionId: z.string().optional() }),
+    z.object({ id: z.number().int(), error: z.object({ code: z.number(), message: z.string() }) }),
+    z.object({ method: z.string(), params: Fields, sessionId: z.string().optional() }),
+  ]),
+)
+type CdpObserver = (method: string, params: CdpFields, session?: string) => void
 
 export class HuddleCdp {
   private sequence = 0
   private closed = false
   private readonly pending = new Map<
     number,
-    { resolve(value: unknown): void; reject(error: SlackHuddleError): void; cancel(): void }
+    { resolve(value: CdpFields): void; reject(error: SlackHuddleError): void; cancel(): void }
   >()
-  private readonly observers = new Set<(method: string, params: unknown, session?: string) => void>()
+  private readonly observers = new Set<CdpObserver>()
   private readonly unsubscribe: () => void
   constructor(
     private readonly wire: CdpWire,
@@ -64,14 +69,7 @@ export class HuddleCdp {
   }
 
   private receive(message: string): void {
-    let value: unknown
-    try {
-      value = JSON.parse(message)
-    } catch {
-      this.fail('cdp_packet_invalid')
-      return
-    }
-    const parsed = Packet.safeParse(value)
+    const parsed = Packet.safeParse(message)
     if (!parsed.success) {
       this.fail('cdp_packet_invalid')
       return
@@ -89,7 +87,7 @@ export class HuddleCdp {
     for (const observer of this.observers) observer(packet.method, packet.params, packet.sessionId)
   }
 
-  observe(observer: (method: string, params: unknown, session?: string) => void): () => void {
+  observe(observer: CdpObserver): () => void {
     this.observers.add(observer)
     return () => {
       this.observers.delete(observer)
@@ -99,11 +97,11 @@ export class HuddleCdp {
   async command<T>(
     method: string,
     schema: z.ZodType<T>,
-    options: { readonly params?: Record<string, unknown>; readonly sessionId?: string } = {},
+    options: { readonly params?: CdpFields; readonly sessionId?: string } = {},
   ): Promise<T> {
     if (this.closed) throw new SlackHuddleError('voice_join_failed', 'cdp_closed')
     const id = ++this.sequence
-    const value = await new Promise<unknown>((resolve, reject) => {
+    const value = await new Promise<CdpFields>((resolve, reject) => {
       const cancel = this.clock.after(3_000, () => {
         this.pending.delete(id)
         reject(new SlackHuddleError('voice_join_failed', 'cdp_command_timeout'))

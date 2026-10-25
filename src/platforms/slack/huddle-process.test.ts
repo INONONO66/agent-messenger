@@ -2,7 +2,7 @@ import { expect, it } from 'bun:test'
 
 import { SlackHuddleError } from './huddle-contract'
 import { Child, Clock, deferred } from './huddle-fixtures.test'
-import { HuddleProcesses } from './huddle-process'
+import { HuddleProcesses, spawnHuddleProcess } from './huddle-process'
 
 it('kills an unresponsive command at its deadline', async () => {
   const clock = new Clock()
@@ -36,4 +36,13 @@ it.each(['input', 'output'])('refuses a %s stream error during a command', async
   child[stream === 'input' ? 'input' : 'output'].emit('error', new Error('broken stream'))
   child.exit()
   await expect(command).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_command_failed'))
+})
+
+it('reports whether a real program started through its spawn receipt', async () => {
+  const started = spawnHuddleProcess(process.execPath, ['-e', ''])
+  expect(await started.spawned).toBe(true)
+  await started.exited
+  const missing = spawnHuddleProcess('/nonexistent/huddle-program', [])
+  expect(await missing.spawned).toBe(false)
+  expect(await missing.exited).toEqual({ code: -1, signal: null })
 })

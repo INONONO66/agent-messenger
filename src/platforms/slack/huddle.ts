@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { SlackClient } from './client'
 import {
-  HuddleStart,
+  HuddleRequest,
   huddleClock,
   huddleFailure,
   SlackHuddleError,
@@ -26,6 +26,7 @@ export function createHuddleJoin(dependencies: {
   readonly client: () => SlackClient
   readonly transport: () => HuddleTransport
   readonly clock: HuddleClock
+  readonly profileRoot?: string
 }) {
   const authenticating = new Set<string>()
   const seats = new Set<string>()
@@ -82,7 +83,7 @@ export function createHuddleJoin(dependencies: {
       seat = key
       authenticating.delete(workspaceId)
       ownsAuthentication = false
-      const input = HuddleStart.safeParse({
+      const input = HuddleRequest.safeParse({
         type: 'start',
         workspaceId,
         channelId,
@@ -95,8 +96,9 @@ export function createHuddleJoin(dependencies: {
         input.data,
         { signal: abort.signal, release },
         {
-          transport: dependencies.transport(),
+          transport: dependencies.transport,
           clock: dependencies.clock,
+          profileRoot: dependencies.profileRoot,
         },
       )
       cancel()
