@@ -160,6 +160,23 @@ async function awaitingConfirmation(temporary: number) {
   return { ...setup, timer }
 }
 
+// Confirms each sendMessage under the next temporary id before its reply; `inspect` sees the request first.
+function confirmSends(fake: FakeTdjson, inspect: (request: Event) => void = () => {}): () => number {
+  let sequence = 0
+  fake.onSend = (id, request) => {
+    if (request['@type'] !== 'sendMessage') return
+    inspect(request)
+    const temp = ++sequence
+    fake.emit(id, {
+      '@type': 'updateMessageSendSucceeded',
+      old_message_id: temp,
+      message: { id: temp + 100, chat_id: 33 },
+    })
+    fake.reply(id, request, { '@type': 'message', id: temp })
+  }
+  return () => sequence
+}
+
 function emitFromUser(fake: FakeTdjson, userId: number, text: string): void {
   fake.emit(1, {
     '@type': 'updateNewMessage',
@@ -791,29 +808,20 @@ describe('history, sends and downloads', () => {
 
   it('stages each media byte kind privately and removes staging after confirmation', async () => {
     const { client, fake, input } = await started()
-    let sequence = 0
-    fake.onSend = (id, request) => {
-      if (request['@type'] !== 'sendMessage') return
+    const confirmed = confirmSends(fake, (request) => {
       const file = request.input_message_content
       const path = (file.photo ?? file.audio ?? file.voice_note ?? file.video ?? file.document).path
       expect(path.startsWith(input.filesDir)).toBe(true)
       expect(readFileSync(path)).toEqual(Buffer.from([1, 2, 3]))
       expect(statSync(path).mode & 0o777).toBe(0o600)
       expect(statSync(join(path, '..')).mode & 0o777).toBe(0o700)
-      const temp = ++sequence
-      fake.emit(id, {
-        '@type': 'updateMessageSendSucceeded',
-        old_message_id: temp,
-        message: { id: temp + 100, chat_id: 33 },
-      })
-      fake.reply(id, request, { '@type': 'message', id: temp })
-    }
+    })
     for (const kind of ['image', 'audio', 'voice', 'video', 'file'] as const) {
       const bytes = new Uint8Array([1, 2, 3])
       await client.send('33', { kind, bytes, name: '../../escape', mime: 'application/octet-stream' })
       expect(await readdir(input.filesDir)).toEqual([])
     }
-    expect(sequence).toBe(5)
+    expect(confirmed()).toBe(5)
   })
 
   it('preserves a document filename while containing hostile names within staging', async () => {
@@ -1031,18 +1039,7 @@ describe('history, sends and downloads', () => {
       ['video', 'inputMessageVideo'],
       ['file', 'inputMessageDocument'],
     ] as const
-    let sequence = 0
-    fake.onSend = (id, request) => {
-      if (request['@type'] === 'sendMessage') {
-        const temp = ++sequence
-        fake.emit(id, {
-          '@type': 'updateMessageSendSucceeded',
-          old_message_id: temp,
-          message: { id: temp + 100, chat_id: 33 },
-        })
-        fake.reply(id, request, { '@type': 'message', id: temp })
-      }
-    }
+    confirmSends(fake)
     for (const [kind, tdType] of cases) {
       await client.send('33', { kind, path: '/tmp/fake', caption: 'caption', replyTo: '4' })
       const sent = fake.sent.at(-1)?.request
