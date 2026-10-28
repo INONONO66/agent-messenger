@@ -6,7 +6,7 @@ import { HuddleProcesses } from './huddle-process.js';
 import { removeHuddleProfile } from './huddle-profile.js';
 import { huddleClickScript, huddleObservationScript } from './huddle-selectors.js';
 const Empty = z.object({});
-const Evaluation = z.object({ result: z.object({ value: z.unknown() }), exceptionDetails: z.unknown().optional() });
+const Evaluation = z.object({ result: z.object({ value: z.unknown().optional() }), exceptionDetails: z.unknown().optional() });
 const Auth = z.object({ ok: z.literal(true), team_id: z.string(), user_id: z.string() });
 const Click = z.union([
     z.object({ x: z.number(), y: z.number() }),

@@ -124,8 +124,8 @@ export declare const HuddleReply: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>], "type">;
 export type HuddleReply = z.infer<typeof HuddleReply>;
 /** JSON text from a page or socket; pipe it into the schema of the value it must carry. */
-export declare const JsonText: z.ZodPipe<z.ZodString, z.ZodTransform<string | number | boolean | z.util.JSONType[] | {
-    [key: string]: z.util.JSONType;
+export declare const JsonText: z.ZodPipe<z.ZodString, z.ZodTransform<string | number | boolean | z.JSONType[] | {
+    [key: string]: z.JSONType;
 } | null, string>>;
 export interface HuddleClock {
     after(ms: number, action: () => void): () => void;
