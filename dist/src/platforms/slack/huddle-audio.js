@@ -28,6 +28,7 @@ export const playbackClock = {
 };
 export async function createHuddleAudio(key, onFailure, processes = new HuddleProcesses(), clock = playbackClock) {
     const modules = [];
+    let previousDefaultSource;
     const devices = {
         transmit: `oni_huddle_tx_${key}`,
         receive: `oni_huddle_rx_${key}`,
@@ -65,6 +66,14 @@ export async function createHuddleAudio(key, onFailure, processes = new HuddlePr
         playback?.input.end();
         processes.kill();
         closed = (async () => {
+            if (previousDefaultSource) {
+                try {
+                    await processes.command('pactl', ['set-default-source', previousDefaultSource]);
+                }
+                catch {
+                    failure = new SlackHuddleError('voice_join_failed', 'audio_cleanup_failed');
+                }
+            }
             await Promise.all([...modules].reverse().map(async (id) => {
                 try {
                     await processes.command('pactl', ['unload-module', id]);
@@ -97,6 +106,12 @@ export async function createHuddleAudio(key, onFailure, processes = new HuddlePr
                 throw new SlackHuddleError('voice_join_failed', 'audio_module_invalid');
             modules.push(id.data);
         }
+        const info = await processes.command('pactl', ['info']);
+        const source = /^Default Source: (.+)$/m.exec(info)?.[1];
+        if (!source)
+            throw new SlackHuddleError('voice_join_failed', 'audio_device_mismatch');
+        await processes.command('pactl', ['set-default-source', devices.microphone]);
+        previousDefaultSource = source;
         const raw = ['--raw', '--format=s16le', '--rate=48000', '--channels=2'];
         const latency = ['--latency-msec=20', '--process-time-msec=10'];
         const activePlayback = processes.open('pacat', ['--playback', ...raw, `--device=${devices.transmit}`, ...latency]);

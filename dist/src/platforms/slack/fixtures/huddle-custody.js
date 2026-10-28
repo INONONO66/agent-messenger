@@ -5,7 +5,8 @@ import { HuddleProcesses, spawnHuddleProcess } from '../huddle-process.js';
 // creates a grandchild sharing stdout, so EOF proves the whole group has exited.
 const spawn = (command, args) => {
     const script = command === 'pactl'
-        ? `process.stdout.write(${JSON.stringify(args[0] === 'load-module' ? '123' : '')})`
+        ? `process.stdout.write(${JSON.stringify(args[0] === 'load-module' ? '123' :
+            args[0] === 'info' ? 'Default Source: auto_null.monitor\n' : '')})`
         : command === 'chromium'
             ? `const {spawn}=require('node:child_process');
          const grandchild=spawn(process.execPath,['-e','process.stdin.resume()'],{stdio:['pipe','inherit','inherit']});

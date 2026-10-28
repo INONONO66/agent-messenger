@@ -135,6 +135,7 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
     let cdp;
     let sessionId;
     let popupId;
+    let popupTargetCreated = false;
     let closing;
     const cancelled = () => cdp?.close();
     signal.addEventListener('abort', cancelled, { once: true });
@@ -162,7 +163,8 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
             return value.data;
         },
         async click(control) {
-            const owner = control === 'headerStart' || control === 'leave' ? sessionId : popupId;
+            const owner = control === 'headerStart' || control === 'leave' || (control === 'useBoth' && !popupId)
+                ? sessionId : popupId;
             if (!cdp || !owner)
                 throw new SlackHuddleError('voice_join_failed', 'selector_missing');
             const result = await cdp.command('Runtime.evaluate', Evaluation, {
@@ -236,6 +238,7 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
                     }) }).safeParse(params);
                 if (created.success && created.data.targetInfo.openerId === target.targetId &&
                     created.data.targetInfo.type === 'page') {
+                    popupTargetCreated = true;
                     void active.command('Target.attachToTarget', z.object({ sessionId: z.string() }), {
                         params: { targetId: created.data.targetInfo.targetId, flatten: true },
                     }).then(async ({ sessionId: popup }) => {
@@ -282,10 +285,18 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
         const activeBeforeStart = observer.snapshot?.channelActive === 1 || (observer.snapshot?.roomMembers ?? 0) > 0;
         if (!activeBeforeStart && input.mode === 'join')
             throw new SlackHuddleError('voice_join_failed', 'room_inactive');
-        const preview = page.wait(() => observer.previewReady());
+        const preview = page.wait(() => observer.previewReady() || (!popupId && observer.snapshot?.useBoth === 1));
         const cancelPreview = processes.clock.after(30_000, () => abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')));
         try {
             await Promise.all([page.click('headerStart'), preview]);
+            if (!popupId && observer.snapshot?.useBoth) {
+                observer.admission();
+                await step(page, 'useBoth');
+                if (!popupTargetCreated && observer.snapshot?.headerStart === 1 && observer.snapshot.leave === 0) {
+                    await page.click('headerStart');
+                }
+                await page.wait(() => observer.previewReady());
+            }
         }
         finally {
             cancelPreview();
