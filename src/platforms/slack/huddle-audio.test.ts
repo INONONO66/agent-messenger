@@ -88,6 +88,34 @@ it('device mismatch refuses and failed unload still kills every child and attemp
   expect(external.calls.every((call) => call.child.killed)).toBe(true)
 })
 
+it('waits for the browser microphone source-output event before accepting its route', async () => {
+  const external = new Processes()
+  const audio = await createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, new Clock()))
+  external.missingRecord = true
+  const opened = external.next('pactl-subscribe')
+  const verifying = audio.verifyRoutes()
+  const subscription = await opened
+  external.missingRecord = false
+  subscription.output.write("Event 'new' on source-output #42\n")
+  await verifying
+  await audio.close()
+})
+
+it('refuses a missing microphone route at the bounded source-output deadline', async () => {
+  const external = new Processes()
+  const timer = new Clock()
+  const audio = await createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, timer))
+  external.missingRecord = true
+  const subscribed = external.next('pactl-subscribe')
+  const verifying = audio.verifyRoutes()
+  const refused = verifying.catch((error) => error)
+  await subscribed
+  await timer.next(10_000)
+  timer.fire(10_000)
+  expect(await refused).toEqual(new SlackHuddleError('voice_join_failed', 'audio_device_mismatch'))
+  await audio.close()
+})
+
 it.each(['eof', 'partial', 'overflow', 'epipe'])(
   'reports capture or transport terminal condition %s',
   async (condition) => {

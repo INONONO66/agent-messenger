@@ -99,17 +99,18 @@ export class Processes {
   failModule = 0
   failUnload = false
   mismatch = false
+  missingRecord = false
   drainPlayback = true
   moduleCount = 0
   readonly spawn: HuddleSpawn = (command, args, env) => {
     const child = new Child(undefined, !this.failSpawn.has(command))
     if (command === 'pacat' && this.drainPlayback) child.input.once('finish', () => child.exit())
     this.calls.push({ command, args, env, child })
-    this.opened.get(command)?.resolve(child)
+    this.opened.get(command === 'pactl' && args[0] === 'subscribe' ? 'pactl-subscribe' : command)?.resolve(child)
     queueMicrotask(() => {
       if (command === 'chromium') {
         child.errors.write('DevTools listening on ws://127.0.0.1:9222/devtools/browser/fixture\n')
-      } else if (command === 'pactl') this.pactl(args, child)
+      } else if (command === 'pactl' && args[0] !== 'subscribe') this.pactl(args, child)
     })
     return child
   }
@@ -138,6 +139,7 @@ export class Processes {
     const app = chromium?.env?.PULSE_PROP_OVERRIDE?.slice('application.name='.length) ?? 'huddle_test'
     if (kind === 'sinks') return [{ index: 20, name: chromium?.env?.PULSE_SINK ?? 'oni_huddle_rx_test' }]
     if (kind === 'sources') return [{ index: 30, name: chromium?.env?.PULSE_SOURCE ?? 'oni_huddle_mic_test' }]
+    if (kind === 'source-outputs' && this.missingRecord) return []
     return [{ sink: this.mismatch ? 99 : 20, source: 30, properties: { 'application.name': app } }]
   }
 }
@@ -196,6 +198,7 @@ export class Wire implements CdpWire {
   responseStatus = 200
   popupOpened = false
   suppressPopup = false
+  suppressSocket = false
   answer = true
   auth = { ok: true, team_id: 'T1', user_id: 'U2' }
   room = structuredClone(room)
@@ -270,6 +273,9 @@ export class Wire implements CdpWire {
           type: 'Document', response: { url: request.params?.url, status: this.responseStatus },
         })
         this.mainPage()
+        if (!this.suppressSocket) this.event('Network.webSocketFrameReceived', {
+          response: { opcode: 1, payloadData: '{}' },
+        })
         break
       case 'Runtime.evaluate':
         result = this.evaluate(z.string().parse(request.params?.expression), request.sessionId)

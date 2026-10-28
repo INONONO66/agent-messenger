@@ -16,6 +16,7 @@ function fixture() {
   const open = (
     input = start,
     verifyAudio = async () => {
+      expect(wire.state.muted).toBe(false)
       verified++
     },
   ) =>
@@ -33,7 +34,7 @@ function fixture() {
   return { external, wire, clock, abort, events, open, verified: () => verified }
 }
 
-it('subscribes before navigation, joins muted, verifies actual devices, then unmutes', async () => {
+it('subscribes before navigation, joins muted, unmutes, then verifies actual devices', async () => {
   const f = fixture()
   const browser = await f.open()
   const methods = f.wire.requests.map((request) => request.method)
@@ -126,6 +127,19 @@ it('refuses a popup that never reaches the preview before its deadline', async (
   expect(await joining).toEqual(new SlackHuddleError('voice_join_failed', 'join_timeout'))
 })
 
+it('waits for a main Slack socket frame before pressing the header button', async () => {
+  const f = fixture()
+  f.wire.suppressSocket = true
+  const navigated = f.wire.next('Page.navigate')
+  const joining = f.open()
+  await navigated
+  expect(f.wire.popupOpened).toBe(false)
+  f.wire.event('Network.webSocketFrameReceived', { response: { opcode: 1, payloadData: '{}' } })
+  const browser = await joining
+  expect(f.wire.popupOpened).toBe(true)
+  await browser.close()
+})
+
 it('call mode waits for speaker in both room evidence and popup tiles', async () => {
   const f = fixture()
   f.wire.main.channelActive = 0
@@ -172,12 +186,13 @@ it('same-identity joins choose keep-both without switching devices', async () =>
   await browser.close()
 })
 
-it('microphone mismatch never unmutes and terminates the browser', async () => {
+it('microphone route mismatch refuses readiness and terminates the browser', async () => {
   const f = fixture()
   await expect(
     f.open(start, () => Promise.reject(new SlackHuddleError('voice_join_failed', 'audio_device_mismatch'))),
   ).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_device_mismatch'))
-  expect(f.wire.state.muted).toBe(true)
+  expect(f.wire.requests.filter((request) =>
+    request.method === 'Input.dispatchMouseEvent' && request.sessionId === 'popup').length).toBeGreaterThan(0)
   expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
 })
 
