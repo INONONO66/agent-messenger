@@ -92,6 +92,14 @@ it('uses trusted CDP clicks on each owning page after attaching the popup', asyn
   await browser.close()
 })
 
+it('attaches a popup whose observation script returns undefined', async () => {
+  const f = fixture()
+  f.wire.observationUndefined = true
+  const browser = await f.open()
+  expect(f.wire.popupOpened).toBe(true)
+  await browser.close()
+})
+
 it('call mode starts an inactive room for the same seat and speaker', async () => {
   const f = fixture()
   f.wire.main.channelActive = 0
