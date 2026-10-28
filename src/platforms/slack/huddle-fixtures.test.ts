@@ -102,6 +102,7 @@ export class Processes {
   missingRecord = false
   drainPlayback = true
   moduleCount = 0
+  defaultSource = 'auto_null.monitor'
   readonly spawn: HuddleSpawn = (command, args, env) => {
     const child = new Child(undefined, !this.failSpawn.has(command))
     if (command === 'pacat' && this.drainPlayback) child.input.once('finish', () => child.exit())
@@ -127,6 +128,12 @@ export class Processes {
         return
       }
       child.output.write(String(this.moduleCount))
+      child.exit()
+    } else if (args[0] === 'info') {
+      child.output.write(`Default Source: ${this.defaultSource}\n`)
+      child.exit()
+    } else if (args[0] === 'set-default-source') {
+      this.defaultSource = args[1] ?? this.defaultSource
       child.exit()
     } else if (args[0] === 'unload-module') child.exit(this.failUnload ? 1 : 0)
     else {
@@ -198,6 +205,7 @@ export class Wire implements CdpWire {
   responseStatus = 200
   popupOpened = false
   suppressPopup = false
+  prePopupConflict = false
   suppressSocket = false
   observationUndefined = false
   answer = true
@@ -302,12 +310,21 @@ export class Wire implements CdpWire {
     const controls = ['headerStart', 'previewMicrophone', 'join', 'microphone', 'useBoth', 'leave'] as const
     this.selected = controls.find((name) => expression.includes(JSON.stringify(huddleSelectors[name])))
     if (this.selected === 'headerStart' && sessionId !== 'session') throw new Error('header click on popup')
-    if (this.selected !== 'headerStart' && this.selected !== 'leave' && sessionId !== 'popup') throw new Error('popup click on main')
+    if (this.selected !== 'headerStart' && this.selected !== 'leave' &&
+      !(this.selected === 'useBoth' && this.prePopupConflict) && sessionId !== 'popup') {
+      throw new Error('popup click on main')
+    }
     return { result: { value: { x: 120, y: 80 } } }
   }
   private click(sessionId?: string) {
     if (this.selected === 'headerStart') {
       if (this.suppressPopup) return
+      if (this.prePopupConflict) {
+        this.main.useBoth = 1
+        this.main.switchDevice = 1
+        this.mainPage()
+        return
+      }
       this.popupOpened = true
       this.receive(JSON.stringify({
         method: 'Target.targetCreated',
@@ -317,8 +334,14 @@ export class Wire implements CdpWire {
     else if (this.selected === 'join') this.join()
     else if (this.selected === 'microphone') this.state.muted = !this.state.muted
     else if (this.selected === 'useBoth') {
-      this.state.useBoth = 0
-      this.state.switchDevice = 0
+      if (this.prePopupConflict && sessionId === 'session') {
+        this.prePopupConflict = false
+        this.main.useBoth = 0
+        this.main.switchDevice = 0
+      } else {
+        this.state.useBoth = 0
+        this.state.switchDevice = 0
+      }
     } else if (this.selected === 'leave' && sessionId === 'session') this.main.leave = 0
     this.mainPage()
     if (this.popupOpened) this.popupPage()

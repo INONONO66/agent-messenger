@@ -67,7 +67,7 @@ it('parent IPC EOF kills real audio roots and the browser grandchild, with exit 
     }
     // The stand-in browser never admits the seat, so capture never starts.
     expect(output).not.toContain('parec')
-    expect(output.match(/EXIT pactl 0/g)).toHaveLength(6)
+    expect(output.match(/EXIT pactl 0/g)).toHaveLength(9)
   } finally {
     if (child.exitCode === null) child.kill('SIGTERM')
   }
