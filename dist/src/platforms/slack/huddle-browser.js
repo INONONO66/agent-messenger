@@ -8,7 +8,10 @@ import { huddleClickScript, huddleObservationScript } from './huddle-selectors.j
 const Empty = z.object({});
 const Evaluation = z.object({ result: z.object({ value: z.unknown() }), exceptionDetails: z.unknown().optional() });
 const Auth = z.object({ ok: z.literal(true), team_id: z.string(), user_id: z.string() });
-const Click = z.enum(['clicked', 'selector_missing', 'selector_ambiguous', 'control_disabled']);
+const Click = z.union([
+    z.object({ x: z.number(), y: z.number() }),
+    z.enum(['selector_missing', 'selector_ambiguous', 'control_disabled']),
+]);
 const Endpoint = /^DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[a-zA-Z0-9-]+)\r?$/;
 function devtoolsEndpoint(errors, signal) {
     return new Promise((resolve, reject) => {
@@ -53,6 +56,8 @@ function launchChromium(processes, profile, options) {
         `--user-data-dir=${profile}`,
         '--no-first-run',
         '--no-default-browser-check',
+        '--use-fake-ui-for-media-stream',
+        '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36',
         '--autoplay-policy=no-user-gesture-required',
         'about:blank',
     ], {
@@ -75,7 +80,7 @@ async function preparePage(cdp, sessionId, input) {
         sessionId,
         params: {
             name: 'd',
-            value: input.credentials.cookie,
+            value: input.credentials.cookie.replace(/^d=/, ''),
             domain: '.slack.com',
             path: '/',
             secure: true,
@@ -129,6 +134,7 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
     const observer = new HuddleObserver(input, options.terminal);
     let cdp;
     let sessionId;
+    let popupId;
     let closing;
     const cancelled = () => cdp?.close();
     signal.addEventListener('abort', cancelled, { once: true });
@@ -156,9 +162,26 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
             return value.data;
         },
         async click(control) {
-            const result = await page.evaluate(huddleClickScript(control), Click, 'page_state_invalid');
-            if (result !== 'clicked')
-                throw new SlackHuddleError('voice_join_failed', result);
+            const owner = control === 'headerStart' || control === 'leave' ? sessionId : popupId;
+            if (!cdp || !owner)
+                throw new SlackHuddleError('voice_join_failed', 'selector_missing');
+            const result = await cdp.command('Runtime.evaluate', Evaluation, {
+                sessionId: owner,
+                params: { expression: huddleClickScript(control), returnByValue: true },
+            });
+            if (result.exceptionDetails)
+                throw new SlackHuddleError('voice_join_failed', 'page_script_failed');
+            const position = Click.safeParse(result.result.value);
+            if (!position.success)
+                throw new SlackHuddleError('voice_join_failed', 'page_state_invalid');
+            if (typeof position.data === 'string')
+                throw new SlackHuddleError('voice_join_failed', position.data);
+            for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+                await cdp.command('Input.dispatchMouseEvent', Empty, {
+                    sessionId: owner,
+                    params: { type, ...position.data, button: 'left', clickCount: 1 },
+                });
+            }
         },
     };
     const leaveRoom = async () => {
@@ -207,29 +230,70 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
         });
         sessionId = attached.sessionId;
         active.observe((method, params, session) => {
-            if (session !== sessionId)
+            if (method === 'Target.targetCreated') {
+                const created = z.object({ targetInfo: z.object({
+                        targetId: z.string(), openerId: z.string().optional(), type: z.string(),
+                    }) }).safeParse(params);
+                if (created.success && created.data.targetInfo.openerId === target.targetId &&
+                    created.data.targetInfo.type === 'page') {
+                    void active.command('Target.attachToTarget', z.object({ sessionId: z.string() }), {
+                        params: { targetId: created.data.targetInfo.targetId, flatten: true },
+                    }).then(async ({ sessionId: popup }) => {
+                        popupId = popup;
+                        for (const name of ['Runtime.enable', 'Page.enable', 'Network.enable'])
+                            await active.command(name, Empty, { sessionId: popup });
+                        await active.command('Runtime.addBinding', Empty, { sessionId: popup, params: { name: 'huddleState' } });
+                        await active.command('Page.addScriptToEvaluateOnNewDocument', z.object({ identifier: z.string() }), {
+                            sessionId: popup, params: { source: huddleObservationScript },
+                        });
+                        await active.command('Runtime.evaluate', Evaluation, { sessionId: popup,
+                            params: { expression: huddleObservationScript, returnByValue: true },
+                        });
+                    }).catch((error) => fail(huddleFailure(error, 'popup_attach_failed').detail));
+                }
+            }
+            if (session !== sessionId && session !== popupId)
                 return;
             try {
-                observer.cdp(method, params);
+                observer.cdp(method, params, session === sessionId ? 'main' : 'popup');
             }
             catch (error) {
                 fail(huddleFailure(error, 'page_state_invalid').detail);
             }
         });
         await preparePage(active, attached.sessionId, input);
-        const preview = page.wait(() => {
-            const state = observer.snapshot;
-            return !!state && state.preview + state.join + state.useBoth + state.switchDevice + state.confirmation > 0;
+        await active.command('Target.setDiscoverTargets', Empty, {
+            params: { discover: true },
         });
+        const loaded = page.wait(() => !!observer.snapshot?.headerStart || !!observer.snapshot?.channelActive);
         await Promise.all([
             active.command('Page.navigate', z.object({ frameId: z.string() }), {
-                sessionId,
-                params: { url: `https://app.slack.com/huddle/${input.workspaceId}/${input.channelId}` },
+                sessionId, params: { url: `https://app.slack.com/client/${input.workspaceId}/${input.channelId}` },
             }),
-            preview,
+            loaded,
         ]);
         await verifyIdentity(page, input);
+        const activeBeforeStart = observer.snapshot?.channelActive === 1 || (observer.snapshot?.roomMembers ?? 0) > 0;
+        if (!activeBeforeStart && input.mode === 'join')
+            throw new SlackHuddleError('voice_join_failed', 'room_inactive');
+        const preview = page.wait(() => observer.previewReady());
+        const cancelPreview = processes.clock.after(30_000, () => abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')));
+        try {
+            await Promise.all([page.click('headerStart'), preview]);
+        }
+        finally {
+            cancelPreview();
+        }
         await admit(page);
+        if (input.mode === 'call' && !activeBeforeStart && input.speakerId !== input.seatId) {
+            const cancelRing = processes.clock.after(60_000, () => abort.abort(new SlackHuddleError('voice_join_failed', 'speaker_no_answer')));
+            try {
+                await page.wait(() => observer.speakerPresent());
+            }
+            finally {
+                cancelRing();
+            }
+        }
         await options.verifyAudio();
         if (signal.aborted)
             throw huddleFailure(signal.reason, 'join_aborted');
@@ -251,9 +315,10 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
         };
     }
     catch (error) {
+        const failure = signal.aborted ? huddleFailure(signal.reason, 'browser_aborted') : huddleFailure(error, 'browser_failed');
         abort.abort();
         await close();
-        throw huddleFailure(error, 'browser_failed');
+        throw failure;
     }
 }
 //# sourceMappingURL=huddle-browser.js.map

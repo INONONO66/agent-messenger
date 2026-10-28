@@ -31,6 +31,10 @@ export declare class SlackHuddleError extends Error {
 }
 export declare const HuddleRequest: z.ZodObject<{
     type: z.ZodLiteral<"start">;
+    mode: z.ZodDefault<z.ZodEnum<{
+        call: "call";
+        join: "join";
+    }>>;
     workspaceId: z.ZodString;
     channelId: z.ZodString;
     speakerId: z.ZodString;
@@ -44,6 +48,10 @@ export type HuddleRequest = z.infer<typeof HuddleRequest>;
 /** The parent owns the browser profile; the host uses this path and never chooses its own. */
 export declare const HuddleStart: z.ZodObject<{
     type: z.ZodLiteral<"start">;
+    mode: z.ZodDefault<z.ZodEnum<{
+        call: "call";
+        join: "join";
+    }>>;
     workspaceId: z.ZodString;
     channelId: z.ZodString;
     speakerId: z.ZodString;
@@ -57,6 +65,10 @@ export declare const HuddleStart: z.ZodObject<{
 export type HuddleStart = z.infer<typeof HuddleStart>;
 export declare const HuddleCommand: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"start">;
+    mode: z.ZodDefault<z.ZodEnum<{
+        call: "call";
+        join: "join";
+    }>>;
     workspaceId: z.ZodString;
     channelId: z.ZodString;
     speakerId: z.ZodString;
