@@ -199,6 +199,7 @@ export class Wire implements CdpWire {
   popupOpened = false
   suppressPopup = false
   suppressSocket = false
+  observationUndefined = false
   answer = true
   auth = { ok: true, team_id: 'T1', user_id: 'U2' }
   room = structuredClone(room)
@@ -291,7 +292,7 @@ export class Wire implements CdpWire {
     if (expression.startsWith('fetch(')) return { result: { value: this.auth } }
     if (expression.includes('globalThis.huddleState')) {
       this.popupPage()
-      return { result: { value: null } }
+      return this.observationUndefined ? { result: { type: 'undefined' } } : { result: { value: null } }
     }
     const leave = expression.includes(JSON.stringify(huddleSelectors.leave))
     if (leave && this.failLeave) {
