@@ -2,7 +2,7 @@ import { expect, it } from 'bun:test'
 
 import { createHuddleBrowser } from './huddle-browser'
 import { SlackHuddleError, type SlackHuddleEvent } from './huddle-contract'
-import { Clock, Processes, Wire, start } from './huddle-fixtures.test'
+import { Clock, Processes, Wire, room, start } from './huddle-fixtures.test'
 import { HuddleProcesses } from './huddle-process'
 import { huddleSelectors } from './huddle-selectors'
 
@@ -53,7 +53,6 @@ it('subscribes before navigation, joins muted, verifies actual devices, then unm
 })
 
 it.each([
-  ['inactive', { joinText: 'Start' }, 'voice_join_failed', 'room_inactive'],
   ['dedicated seat conflict', { useBoth: 1, switchDevice: 1 }, 'voice_busy', 'multi_device'],
   ['access request', { confirmation: 1 }, 'voice_join_failed', 'access_request'],
   ['duplicated selector', { join: 2 }, 'voice_join_failed', 'selector_ambiguous'],
@@ -63,6 +62,87 @@ it.each([
   Object.assign(f.wire.state, patch)
   await expect(f.open()).rejects.toEqual(new SlackHuddleError(code, detail))
   expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
+})
+
+it('refuses inactive room before opening a popup in join mode', async () => {
+  const f = fixture()
+  f.wire.main.channelActive = 0
+  f.wire.main.roomMembers = 0
+  await expect(f.open()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'room_inactive'))
+  expect(f.wire.popupOpened).toBe(false)
+})
+
+it.each([500, 403])('fails fast for main document status %d', async (status) => {
+  const f = fixture()
+  f.wire.responseStatus = status
+  await expect(f.open()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'page_unavailable'))
+  expect(f.wire.popupOpened).toBe(false)
+})
+
+it('uses trusted CDP clicks on each owning page after attaching the popup', async () => {
+  const f = fixture()
+  const browser = await f.open()
+  const requests = f.wire.requests
+  const index = (name: string) => requests.findIndex((request) => request.method === name)
+  expect(index('Target.setDiscoverTargets')).toBeLessThan(index('Input.dispatchMouseEvent'))
+  expect(requests.filter((request) => request.method === 'Runtime.addBinding' && request.sessionId === 'popup')).toHaveLength(1)
+  expect(requests.filter((request) => request.method === 'Input.dispatchMouseEvent' && request.sessionId === 'popup').length).toBeGreaterThan(0)
+  expect(requests.filter((request) => request.method === 'Input.dispatchMouseEvent' && request.sessionId === 'session').length).toBeGreaterThan(0)
+  await browser.close()
+})
+
+it('call mode starts an inactive room for the same seat and speaker', async () => {
+  const f = fixture()
+  f.wire.main.channelActive = 0
+  f.wire.main.roomMembers = 0
+  f.wire.auth.user_id = 'U1'
+  f.wire.room.user = 'U1'
+  f.wire.state.peers = ['U1']
+  f.wire.room.room.participants = ['U1']
+  const browser = await f.open({ ...start, mode: 'call', seatId: 'U1' })
+  expect(f.wire.main.channelActive).toBe(1)
+  await browser.close()
+})
+
+it('call mode reports speaker_no_answer after the ring deadline', async () => {
+  const f = fixture()
+  f.wire.main.channelActive = 0
+  f.wire.main.roomMembers = 0
+  f.wire.answer = false
+  const ring = f.clock.next(60_000)
+  const ringing = f.open({ ...start, mode: 'call' }).catch((error) => error)
+  await ring
+  f.clock.fire(60_000)
+  expect(await ringing).toEqual(new SlackHuddleError('voice_join_failed', 'speaker_no_answer'))
+})
+
+it('refuses a popup that never reaches the preview before its deadline', async () => {
+  const f = fixture()
+  f.wire.suppressPopup = true
+  const previewDeadline = f.clock.next(30_000)
+  const joining = f.open().catch((error) => error)
+  await previewDeadline
+  f.clock.fire(30_000)
+  expect(await joining).toEqual(new SlackHuddleError('voice_join_failed', 'join_timeout'))
+})
+
+it('call mode waits for speaker in both room evidence and popup tiles', async () => {
+  const f = fixture()
+  f.wire.main.channelActive = 0
+  f.wire.main.roomMembers = 0
+  f.wire.answer = false
+  const ring = f.clock.next(60_000)
+  const joining = f.open({ ...start, mode: 'call' })
+  await ring
+  f.wire.state.peers = ['U1', 'U2']
+  f.wire.page()
+  expect(f.verified()).toBe(0)
+  f.wire.event('Network.webSocketFrameReceived', {
+    response: { opcode: 1, payloadData: JSON.stringify(room) },
+  }, 'popup')
+  const browser = await joining
+  expect(f.verified()).toBe(1)
+  await browser.close()
 })
 
 it('same-identity joins choose keep-both without switching devices', async () => {
@@ -75,7 +155,8 @@ it('same-identity joins choose keep-both without switching devices', async () =>
   f.wire.room.user = 'U1'
   const browser = await f.open({ ...start, seatId: 'U1' })
   const actions = f.wire.requests
-    .filter((request) => request.method === 'Runtime.evaluate')
+    .filter((request) => request.method === 'Runtime.evaluate' &&
+      String(request.params?.expression).includes('scrollIntoView'))
     .map((request) => request.params?.expression)
   expect(
     actions.some(
@@ -146,6 +227,7 @@ it('handles a same-identity device prompt that appears only after joining', asyn
   const both = f.wire.requests.filter(
     (request) =>
       request.method === 'Runtime.evaluate' &&
+      String(request.params?.expression).includes('scrollIntoView') &&
       String(request.params?.expression).includes(JSON.stringify(huddleSelectors.useBoth)),
   )
   expect(both).toHaveLength(1)

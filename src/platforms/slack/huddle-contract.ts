@@ -32,6 +32,7 @@ export class SlackHuddleError extends Error {
 
 export const HuddleRequest = z.object({
   type: z.literal('start'),
+  mode: z.enum(['join', 'call']).default('join'),
   workspaceId: z.string().regex(/^T[A-Z0-9]+$/),
   channelId: z.string().regex(/^[CDG][A-Z0-9]+$/),
   speakerId: z.string().regex(/^[UW][A-Z0-9]+$/),
