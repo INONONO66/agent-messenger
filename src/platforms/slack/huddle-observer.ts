@@ -31,6 +31,7 @@ const Response = z.object({ response: z.object({ url: z.string(), status: z.numb
 /** Room evidence and peer tiles are both required; silence/mute is never departure. */
 export class HuddleObserver {
   snapshot: HuddleSnapshot | undefined
+  mainSocketReady = false
   private main: HuddleSnapshot | undefined
   private popup: HuddleSnapshot | undefined
   room: SlackHuddleRoomJoined | undefined
@@ -86,7 +87,9 @@ export class HuddleObserver {
       }
       case 'Network.webSocketFrameReceived': {
         const frame = Frame.parse(params)
+        if (source === 'main') this.mainSocketReady = true
         if (frame.response.opcode === 1) this.frame(frame.response.payloadData)
+        this.changed()
         break
       }
       case 'Network.responseReceived': {

@@ -160,27 +160,42 @@ export async function createHuddleAudio(
       startCapture,
       close,
       async verifyRoutes(): Promise<void> {
-        const [sinks, sources, inputs, outputs] = await Promise.all([
-          processes.command('pactl', ['--format=json', 'list', 'sinks']),
-          processes.command('pactl', ['--format=json', 'list', 'sources']),
-          processes.command('pactl', ['--format=json', 'list', 'sink-inputs']),
-          processes.command('pactl', ['--format=json', 'list', 'source-outputs']),
-        ])
-        const receive = Devices.parse(JSON.parse(sinks)).find((device) => device.name === devices.receive)
-        const microphone = Devices.parse(JSON.parse(sources)).find((device) => device.name === devices.microphone)
-        const belongs = (stream: z.infer<typeof Streams>[number]) =>
-          stream.properties['application.name'] === `huddle_${key}`
-        const render = Streams.parse(JSON.parse(inputs)).filter(belongs)
-        const record = Streams.parse(JSON.parse(outputs)).filter(belongs)
-        if (
-          !receive ||
-          !microphone ||
-          !render.length ||
-          !record.length ||
-          render.some((stream) => stream.sink !== receive.index) ||
-          record.some((stream) => stream.source !== microphone.index)
-        ) {
+        const routes = async () => {
+          const [sinks, sources, inputs, outputs] = await Promise.all([
+            processes.command('pactl', ['--format=json', 'list', 'sinks']),
+            processes.command('pactl', ['--format=json', 'list', 'sources']),
+            processes.command('pactl', ['--format=json', 'list', 'sink-inputs']),
+            processes.command('pactl', ['--format=json', 'list', 'source-outputs']),
+          ])
+          const receive = Devices.parse(JSON.parse(sinks)).find((device) => device.name === devices.receive)
+          const microphone = Devices.parse(JSON.parse(sources)).find((device) => device.name === devices.microphone)
+          const belongs = (stream: z.infer<typeof Streams>[number]) =>
+            stream.properties['application.name'] === `huddle_${key}`
+          const render = Streams.parse(JSON.parse(inputs)).filter(belongs)
+          const record = Streams.parse(JSON.parse(outputs)).filter(belongs)
+          if (
+            !receive ||
+            !microphone ||
+            !render.length ||
+            render.some((stream) => stream.sink !== receive.index) ||
+            record.some((stream) => stream.source !== microphone.index)
+          ) {
+            throw new SlackHuddleError('voice_join_failed', 'audio_device_mismatch')
+          }
+          return record.length > 0
+        }
+        if (await routes()) return
+        const subscription = processes.open('pactl', ['subscribe'])
+        const cancel = processes.clock.after(10_000, () => subscription.kill())
+        try {
+          if (await routes()) return
+          for await (const event of subscription.output) {
+            if (event.toString().includes('source-output') && await routes()) return
+          }
           throw new SlackHuddleError('voice_join_failed', 'audio_device_mismatch')
+        } finally {
+          cancel()
+          subscription.kill()
         }
       },
     }

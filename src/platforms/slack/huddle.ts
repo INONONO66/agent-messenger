@@ -45,7 +45,7 @@ export function createHuddleJoin(dependencies: {
     if (authenticating.has(workspaceId)) throw new SlackHuddleError('voice_busy', 'seat_authenticating')
     authenticating.add(workspaceId)
     const abort = new AbortController()
-    const cancel = dependencies.clock.after(options.mode === 'call' ? 120_000 : 30_000, () =>
+    const cancel = dependencies.clock.after(options.mode === 'call' ? 180_000 : 30_000, () =>
       abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')),
     )
     const cancelled = () => abort.abort(new SlackHuddleError('voice_aborted', 'join_aborted'))
