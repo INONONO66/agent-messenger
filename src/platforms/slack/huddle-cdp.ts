@@ -97,7 +97,7 @@ export class HuddleCdp {
   async command<T>(
     method: string,
     schema: z.ZodType<T>,
-    options: { readonly params?: CdpFields; readonly sessionId?: string } = {},
+    options: { readonly params?: CdpFields; readonly sessionId?: string; readonly step?: string } = {},
   ): Promise<T> {
     if (this.closed) throw new SlackHuddleError('voice_join_failed', 'cdp_closed')
     const id = ++this.sequence
@@ -109,13 +109,20 @@ export class HuddleCdp {
       })
       this.pending.set(id, { resolve, reject, cancel })
       try {
-        this.wire.send(JSON.stringify({ id, method, ...options }))
+        this.wire.send(JSON.stringify({ id, method, params: options.params, sessionId: options.sessionId }))
       } catch {
         this.fail('cdp_send_failed')
       }
     })
     const parsed = schema.safeParse(value)
-    if (!parsed.success) throw new SlackHuddleError('voice_join_failed', 'cdp_result_invalid')
+    if (!parsed.success) {
+      if (process.env.HUDDLE_TRACE === '1') {
+        const result = value.result
+        const resultFields = result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result) : []
+        process.stderr.write(`huddle_cdp_invalid ${method}:${options.step ?? '-'} fields=${Object.keys(value).join(',')} result_fields=${resultFields.join(',')} issues=${parsed.error.issues.map((issue) => issue.path.join('.')).join(',')}\n`)
+      }
+      throw new SlackHuddleError('voice_join_failed', `cdp_result_invalid:${method}${options.step ? `:${options.step}` : ''}`)
+    }
     return parsed.data
   }
 

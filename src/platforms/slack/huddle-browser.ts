@@ -186,7 +186,7 @@ export async function createHuddleBrowser(
       if (!cdp || !sessionId) throw new SlackHuddleError('voice_join_failed', 'cdp_closed')
       const result = await cdp.command('Runtime.evaluate', Evaluation, {
         sessionId,
-        params: { expression, returnByValue: true, awaitPromise: true },
+        params: { expression, returnByValue: true, awaitPromise: true }, step: invalid,
       })
       if (result.exceptionDetails) throw new SlackHuddleError('voice_join_failed', 'page_script_failed')
       const value = schema.safeParse(result.result.value)
@@ -198,7 +198,7 @@ export async function createHuddleBrowser(
       if (!cdp || !owner) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
       const result = await cdp.command('Runtime.evaluate', Evaluation, {
         sessionId: owner,
-        params: { expression: huddleClickScript(control), returnByValue: true },
+        params: { expression: huddleClickScript(control), returnByValue: true }, step: control,
       })
       if (result.exceptionDetails) throw new SlackHuddleError('voice_join_failed', 'page_script_failed')
       const position = Click.safeParse(result.result.value)
@@ -270,7 +270,7 @@ export async function createHuddleBrowser(
               sessionId: popup, params: { source: huddleObservationScript },
             })
             await active.command('Runtime.evaluate', Evaluation, { sessionId: popup,
-              params: { expression: huddleObservationScript, returnByValue: true },
+              params: { expression: huddleObservationScript, returnByValue: true }, step: 'popup_observation',
             })
           }).catch((error) => fail(huddleFailure(error, 'popup_attach_failed').detail))
         }
