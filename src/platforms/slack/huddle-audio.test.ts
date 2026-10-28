@@ -32,6 +32,10 @@ it('builds disjoint transmit and receive routes with exact raw format and unload
       'channels=2',
     ],
   ])
+  expect(external.defaultSource).toBe('oni_huddle_mic_test')
+  expect(external.calls.findIndex((call) => call.args[0] === 'set-default-source')).toBeLessThan(
+    external.calls.findIndex((call) => call.command === 'pacat'),
+  )
   expect(external.calls.find((call) => call.command === 'pacat')?.args).toEqual([
     '--playback',
     '--raw',
@@ -56,6 +60,7 @@ it('builds disjoint transmit and receive routes with exact raw format and unload
   const first = audio.close()
   expect(audio.close()).toBe(first)
   await first
+  expect(external.defaultSource).toBe('auto_null.monitor')
   expect(external.calls.filter((call) => call.args[0] === 'unload-module').map((call) => call.args[1])).toEqual([
     '3',
     '2',

@@ -194,6 +194,25 @@ it('same-identity joins choose keep-both without switching devices', async () =>
   await browser.close()
 })
 
+it('accepts a same-seat device prompt on the main page before the popup opens', async () => {
+  const f = fixture()
+  f.wire.prePopupConflict = true
+  f.wire.state.peers = ['U1']
+  f.wire.room.room.participants = ['U1']
+  f.wire.auth.user_id = 'U1'
+  f.wire.room.user = 'U1'
+  const browser = await f.open({ ...start, seatId: 'U1' })
+  expect(f.wire.requests.some((request) =>
+    request.method === 'Runtime.evaluate' && request.sessionId === 'session' &&
+    String(request.params?.expression).includes(JSON.stringify(huddleSelectors.useBoth)))).toBe(true)
+  expect(f.wire.requests.filter((request) =>
+    request.method === 'Runtime.evaluate' &&
+    String(request.params?.expression).includes('scrollIntoView') &&
+    String(request.params?.expression).includes(JSON.stringify(huddleSelectors.headerStart)))).toHaveLength(2)
+  expect(f.wire.popupOpened).toBe(true)
+  await browser.close()
+})
+
 it('microphone route mismatch refuses readiness and terminates the browser', async () => {
   const f = fixture()
   await expect(
