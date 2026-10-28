@@ -56,13 +56,21 @@ it.each(['not-json', '{}'])('rejects malformed CDP packets %s', (packet) => {
 it('redacts command error messages and refuses wrong result shapes', async () => {
   const wire = new Wire()
   wire.hold.add('held')
+  wire.hold.add('Runtime.evaluate')
   const cdp = new HuddleCdp(wire, () => {}, new Clock())
   const command = cdp.command('held', z.object({ ok: z.literal(true) }))
   wire.receive(JSON.stringify({ id: 1, error: { code: -1, message: 'secret' } }))
   await expect(command).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'cdp_command_failed'))
-  await expect(cdp.command('other', z.object({ ok: z.literal(true) }))).rejects.toEqual(
-    new SlackHuddleError('voice_join_failed', 'cdp_result_invalid'),
+  const invalid = cdp.command('Runtime.evaluate', z.object({ ok: z.literal(true) }), {
+    params: { expression: '1 + 1' }, step: 'headerStart',
+  })
+  wire.receive(JSON.stringify({ id: 2, result: { result: { type: 'number', value: 2 } } }))
+  await expect(invalid).rejects.toEqual(
+    new SlackHuddleError('voice_join_failed', 'cdp_result_invalid:Runtime.evaluate:headerStart'),
   )
+  expect(wire.requests.at(-1)).toEqual({
+    id: 2, method: 'Runtime.evaluate', params: { expression: '1 + 1' },
+  })
   cdp.close()
 })
 
