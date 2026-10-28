@@ -32,12 +32,20 @@ export function deferred<T>() {
 
 export class Clock implements HuddleClock {
   readonly pending = new Set<{ ms: number; action: () => void }>()
+  readonly scheduled = new Map<number, ReturnType<typeof deferred<void>>>()
   after(ms: number, action: () => void) {
     const entry = { ms, action }
     this.pending.add(entry)
+    this.scheduled.get(ms)?.resolve()
     return () => {
       this.pending.delete(entry)
     }
+  }
+  next(ms: number): Promise<void> {
+    if ([...this.pending].some((entry) => entry.ms === ms)) return Promise.resolve()
+    const signal = deferred<void>()
+    this.scheduled.set(ms, signal)
+    return signal.promise
   }
   fire(ms: number) {
     const due = [...this.pending].filter((entry) => entry.ms === ms)
@@ -140,6 +148,7 @@ export const fixtureProfileRoot = join(tmpdir(), `agent-messenger-slack-huddle-t
 export const removeFixtureProfileRoot = () => rm(fixtureProfileRoot, { recursive: true, force: true })
 export const request: HuddleRequest = {
   type: 'start',
+  mode: 'join',
   workspaceId: 'T1',
   channelId: 'C1',
   speakerId: 'U1',
@@ -148,14 +157,16 @@ export const request: HuddleRequest = {
 }
 export const start: HuddleStart = { ...request, profile: join(fixtureProfileRoot, 'unit-profile') }
 export const snapshot: HuddleSnapshot = {
-  url: 'https://app.slack.com/huddle/T1/C1',
+  url: 'https://app.slack.com/client/T1/C1',
+  pageUnavailable: false,
+  headerStart: 1,
   preview: 1,
   join: 1,
-  joinText: 'Join',
   previewMuted: false,
   muted: true,
   leave: 0,
   channelActive: 1,
+  roomMembers: 1,
   useBoth: 0,
   switchDevice: 0,
   confirmation: 0,
@@ -181,6 +192,11 @@ export class Wire implements CdpWire {
   readonly opened = Promise.resolve()
   readonly requests: Request[] = []
   state = { ...snapshot }
+  main = { ...snapshot, preview: 0, join: 0, dialogs: 0, peers: [], muted: null, previewMuted: null }
+  responseStatus = 200
+  popupOpened = false
+  suppressPopup = false
+  answer = true
   auth = { ok: true, team_id: 'T1', user_id: 'U2' }
   room = structuredClone(room)
   hold = new Set<string>()
@@ -235,7 +251,12 @@ export class Wire implements CdpWire {
         result = { targetId: 'target' }
         break
       case 'Target.attachToTarget':
-        result = { sessionId: 'session' }
+        result = { sessionId: request.params?.targetId === 'popup-target' ? 'popup' : 'session' }
+        break
+      case 'Target.setAutoAttach':
+        break
+      case 'Runtime.runIfWaitingForDebugger':
+        this.popupPage()
         break
       case 'Network.setCookie':
         result = { success: true }
@@ -245,50 +266,84 @@ export class Wire implements CdpWire {
         break
       case 'Page.navigate':
         result = { frameId: 'frame' }
-        this.page()
+        this.event('Network.responseReceived', {
+          type: 'Document', response: { url: request.params?.url, status: this.responseStatus },
+        })
+        this.mainPage()
         break
       case 'Runtime.evaluate':
-        result = this.evaluate(z.string().parse(request.params?.expression))
+        result = this.evaluate(z.string().parse(request.params?.expression), request.sessionId)
+        break
+      case 'Input.dispatchMouseEvent':
+        if (request.params?.type === 'mouseReleased') this.click(request.sessionId)
         break
     }
     this.receive(JSON.stringify({ id: request.id, result }))
   }
-  private evaluate(expression: string): object {
+  private selected: string | undefined
+  private evaluate(expression: string, sessionId?: string): object {
     if (expression.startsWith('fetch(')) return { result: { value: this.auth } }
+    if (expression.includes('globalThis.huddleState')) {
+      this.popupPage()
+      return { result: { value: null } }
+    }
     const leave = expression.includes(JSON.stringify(huddleSelectors.leave))
     if (leave && this.failLeave) {
-      this.page()
+      this.mainPage()
       return { result: { value: 'selector_missing' } }
     }
-    this.click(expression)
-    this.page()
-    return { result: { value: 'clicked' } }
+    const controls = ['headerStart', 'previewMicrophone', 'join', 'microphone', 'useBoth', 'leave'] as const
+    this.selected = controls.find((name) => expression.includes(JSON.stringify(huddleSelectors[name])))
+    if (this.selected === 'headerStart' && sessionId !== 'session') throw new Error('header click on popup')
+    if (this.selected !== 'headerStart' && this.selected !== 'leave' && sessionId !== 'popup') throw new Error('popup click on main')
+    return { result: { value: { x: 120, y: 80 } } }
   }
-  private click(expression: string) {
-    const names = (selector: string) => expression.includes(JSON.stringify(selector))
-    if (names(huddleSelectors.previewMicrophone)) this.state.previewMuted = true
-    else if (names(huddleSelectors.join)) this.join()
-    else if (names(huddleSelectors.microphone)) this.state.muted = !this.state.muted
-    else if (names(huddleSelectors.useBoth)) {
+  private click(sessionId?: string) {
+    if (this.selected === 'headerStart') {
+      if (this.suppressPopup) return
+      this.popupOpened = true
+      this.receive(JSON.stringify({
+        method: 'Target.targetCreated',
+        params: { targetInfo: { targetId: 'popup-target', openerId: 'target', type: 'page' } },
+      }))
+    } else if (this.selected === 'previewMicrophone') this.state.previewMuted = true
+    else if (this.selected === 'join') this.join()
+    else if (this.selected === 'microphone') this.state.muted = !this.state.muted
+    else if (this.selected === 'useBoth') {
       this.state.useBoth = 0
       this.state.switchDevice = 0
-    } else if (names(huddleSelectors.leave)) this.state.leave = 0
+    } else if (this.selected === 'leave' && sessionId === 'session') this.main.leave = 0
+    this.mainPage()
+    if (this.popupOpened) this.popupPage()
   }
   private join() {
-    this.state = { ...this.state, preview: 0, join: 0, leave: 1, dialogs: 0 }
+    this.state = { ...this.state, preview: 0, join: 0, dialogs: 0 }
+    this.main.leave = 1
+    this.main.channelActive = 1
+    this.main.roomMembers = 1
+    if (!this.answer) {
+      this.state.peers = ['U2']
+      this.room.room.participants = ['U2']
+    }
     if (this.postJoinConflict) {
       this.state.useBoth = 1
       this.state.switchDevice = 1
     }
     this.event('Network.webSocketFrameReceived', {
       response: { opcode: 1, payloadData: JSON.stringify(this.room) },
-    })
+    }, 'popup')
   }
-  event(method: string, params: object) {
-    this.receive(JSON.stringify({ method, params, sessionId: 'session' }))
+  event(method: string, params: object, sessionId = 'session') {
+    this.receive(JSON.stringify({ method, params, sessionId }))
+  }
+  mainPage() {
+    this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.main) })
+  }
+  popupPage() {
+    this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.state) }, 'popup')
   }
   page() {
-    this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.state) })
+    this.popupPage()
   }
   close() {
     this.closed = true

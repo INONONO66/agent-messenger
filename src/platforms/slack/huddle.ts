@@ -37,6 +37,7 @@ export function createHuddleJoin(dependencies: {
     options: {
       readonly credentials: SlackSessionCredentials
       readonly speakerId: string
+      readonly mode?: 'join' | 'call'
       readonly signal?: AbortSignal
     },
   ): Promise<SlackHuddleHandle> {
@@ -44,7 +45,7 @@ export function createHuddleJoin(dependencies: {
     if (authenticating.has(workspaceId)) throw new SlackHuddleError('voice_busy', 'seat_authenticating')
     authenticating.add(workspaceId)
     const abort = new AbortController()
-    const cancel = dependencies.clock.after(30_000, () =>
+    const cancel = dependencies.clock.after(options.mode === 'call' ? 120_000 : 30_000, () =>
       abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')),
     )
     const cancelled = () => abort.abort(new SlackHuddleError('voice_aborted', 'join_aborted'))
@@ -88,6 +89,7 @@ export function createHuddleJoin(dependencies: {
         workspaceId,
         channelId,
         speakerId: options.speakerId,
+        mode: options.mode ?? 'join',
         seatId: identity.user_id,
         credentials: options.credentials,
       })
@@ -122,6 +124,7 @@ export function joinHuddle(
   options: {
     readonly credentials: SlackSessionCredentials
     readonly speakerId: string
+    readonly mode?: 'join' | 'call'
     readonly signal?: AbortSignal
   },
 ): Promise<SlackHuddleHandle> {
