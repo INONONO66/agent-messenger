@@ -28,6 +28,7 @@ export class HuddleObserver {
     input;
     terminal;
     snapshot;
+    mainSocketReady = false;
     main;
     popup;
     room;
@@ -84,8 +85,11 @@ export class HuddleObserver {
             }
             case 'Network.webSocketFrameReceived': {
                 const frame = Frame.parse(params);
+                if (source === 'main')
+                    this.mainSocketReady = true;
                 if (frame.response.opcode === 1)
                     this.frame(frame.response.payloadData);
+                this.changed();
                 break;
             }
             case 'Network.responseReceived': {

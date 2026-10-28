@@ -25,6 +25,7 @@ export declare class HuddleObserver {
     readonly input: HuddleRequest;
     private readonly terminal;
     snapshot: HuddleSnapshot | undefined;
+    mainSocketReady: boolean;
     private main;
     private popup;
     room: SlackHuddleRoomJoined | undefined;

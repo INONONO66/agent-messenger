@@ -265,13 +265,19 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
         await active.command('Target.setDiscoverTargets', Empty, {
             params: { discover: true },
         });
-        const loaded = page.wait(() => !!observer.snapshot?.headerStart || !!observer.snapshot?.channelActive);
-        await Promise.all([
-            active.command('Page.navigate', z.object({ frameId: z.string() }), {
-                sessionId, params: { url: `https://app.slack.com/client/${input.workspaceId}/${input.channelId}` },
-            }),
-            loaded,
-        ]);
+        const loaded = page.wait(() => (!!observer.snapshot?.headerStart || !!observer.snapshot?.channelActive) && observer.mainSocketReady);
+        const cancelLoad = processes.clock.after(30_000, () => abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')));
+        try {
+            await Promise.all([
+                active.command('Page.navigate', z.object({ frameId: z.string() }), {
+                    sessionId, params: { url: `https://app.slack.com/client/${input.workspaceId}/${input.channelId}` },
+                }),
+                loaded,
+            ]);
+        }
+        finally {
+            cancelLoad();
+        }
         await verifyIdentity(page, input);
         const activeBeforeStart = observer.snapshot?.channelActive === 1 || (observer.snapshot?.roomMembers ?? 0) > 0;
         if (!activeBeforeStart && input.mode === 'join')
@@ -294,7 +300,6 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
                 cancelRing();
             }
         }
-        await options.verifyAudio();
         if (signal.aborted)
             throw huddleFailure(signal.reason, 'join_aborted');
         if (!observer.joined())
@@ -302,6 +307,8 @@ export async function createHuddleBrowser(input, options, dependencies = {}) {
         const unmuted = page.wait(() => observer.snapshot?.muted === false);
         await Promise.all([page.click('microphone'), unmuted]);
         // The roster, location and controls may have changed while the unmute was pending.
+        observer.admitted();
+        await options.verifyAudio();
         observer.admitted();
         observer.markReady();
         return {
