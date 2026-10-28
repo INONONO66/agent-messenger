@@ -25,6 +25,7 @@ export declare class HuddleCdp {
     command<T>(method: string, schema: z.ZodType<T>, options?: {
         readonly params?: CdpFields;
         readonly sessionId?: string;
+        readonly step?: string;
     }): Promise<T>;
     private fail;
     close(): void;
