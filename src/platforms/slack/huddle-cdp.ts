@@ -116,11 +116,6 @@ export class HuddleCdp {
     })
     const parsed = schema.safeParse(value)
     if (!parsed.success) {
-      if (process.env.HUDDLE_TRACE === '1') {
-        const result = value.result
-        const resultFields = result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result) : []
-        process.stderr.write(`huddle_cdp_invalid ${method}:${options.step ?? '-'} fields=${Object.keys(value).join(',')} result_fields=${resultFields.join(',')} issues=${parsed.error.issues.map((issue) => issue.path.join('.')).join(',')}\n`)
-      }
       throw new SlackHuddleError('voice_join_failed', `cdp_result_invalid:${method}${options.step ? `:${options.step}` : ''}`)
     }
     return parsed.data
