@@ -101,6 +101,22 @@ it('abort and the thirty-second authentication deadline release the pending rese
   await f.host.stop()
 })
 
+it('call mode reserves a three-minute outer deadline for admission and ringing', async () => {
+  const f = loopback()
+  const client = new SlackClient({ retries: 0 })
+  const { auth, called } = pendingAuth(client)
+  const join = createHuddleJoin({ client: () => client, ...f })
+  const pending = join('T1', 'C1', {
+    credentials: start.credentials, speakerId: 'U1', mode: 'call',
+  }).catch((error) => error)
+  await called
+  expect([...f.clock.pending].map((timer) => timer.ms)).toContain(180_000)
+  f.clock.fire(180_000)
+  expect(await pending).toEqual(new SlackHuddleError('voice_join_failed', 'join_timeout'))
+  auth.resolve({ user_id: 'U2', team_id: 'T1' })
+  await f.host.stop()
+})
+
 it('an abort during credential login refuses before auth and releases the reservation', async () => {
   const f = loopback()
   const abort = new AbortController()
