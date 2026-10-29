@@ -32,6 +32,10 @@ it('builds disjoint transmit and receive routes with exact raw format and unload
       'channels=2',
     ],
   ])
+  expect(external.defaultSource).toBe('oni_huddle_mic_test')
+  expect(external.calls.findIndex((call) => call.args[0] === 'set-default-source')).toBeLessThan(
+    external.calls.findIndex((call) => call.command === 'pacat'),
+  )
   expect(external.calls.find((call) => call.command === 'pacat')?.args).toEqual([
     '--playback',
     '--raw',
@@ -56,6 +60,7 @@ it('builds disjoint transmit and receive routes with exact raw format and unload
   const first = audio.close()
   expect(audio.close()).toBe(first)
   await first
+  expect(external.defaultSource).toBe('auto_null.monitor')
   expect(external.calls.filter((call) => call.args[0] === 'unload-module').map((call) => call.args[1])).toEqual([
     '3',
     '2',
@@ -86,6 +91,89 @@ it('device mismatch refuses and failed unload still kills every child and attemp
   await expect(audio.close()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_cleanup_failed'))
   expect(external.calls.filter((call) => call.args[0] === 'unload-module')).toHaveLength(3)
   expect(external.calls.every((call) => call.child.killed)).toBe(true)
+})
+
+it('leaves another session default intact when closing interleaved audio graphs', async () => {
+  const external = new Processes()
+  const first = await createHuddleAudio('first', () => {}, new HuddleProcesses(external.spawn, new Clock()))
+  const second = await createHuddleAudio('second', () => {}, new HuddleProcesses(external.spawn, new Clock()))
+  await first.close()
+  expect(external.defaultSource).toBe('oni_huddle_mic_second')
+  await second.close()
+  expect(external.defaultSource).toBe('auto_null.monitor')
+  expect(external.calls.some((call) =>
+    call.args[0] === 'set-default-source' && call.args[1] === 'oni_huddle_mic_first' &&
+    external.calls.indexOf(call) > external.calls.findIndex((entry) =>
+      entry.args[0] === 'unload-module'))).toBe(false)
+})
+
+it('preserves a default source changed by another application', async () => {
+  const { external, audio } = await audioFixture()
+  external.defaultSource = 'external.microphone'
+  await audio.close()
+  expect(external.defaultSource).toBe('external.microphone')
+})
+
+it('reports failed default restoration while unloading all modules', async () => {
+  const { external, audio } = await audioFixture()
+  external.failDefault = true
+  await expect(audio.close()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_cleanup_failed'))
+  expect(external.calls.filter((call) => call.args[0] === 'unload-module')).toHaveLength(3)
+  expect(external.calls.every((call) => call.child.killed)).toBe(true)
+})
+
+it('restores the default after playback startup fails', async () => {
+  const external = new Processes()
+  external.failPlayback = true
+  await expect(createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, new Clock())))
+    .rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_graph_failed'))
+  expect(external.defaultSource).toBe('auto_null.monitor')
+  expect(external.calls.filter((call) => call.args[0] === 'unload-module')).toHaveLength(3)
+})
+
+it('reads the default source through the supported command or JSON fallback', async () => {
+  const external = new Processes()
+  external.unsupportedDefault = true
+  const audio = await createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, new Clock()))
+  expect(external.calls.some((call) => call.args.join(' ') === '--format=json info')).toBe(true)
+  await audio.close()
+  expect(external.defaultSource).toBe('auto_null.monitor')
+})
+
+it('refuses an empty default source with its own typed reason', async () => {
+  const external = new Processes()
+  external.missingDefault = true
+  await expect(createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, new Clock())))
+    .rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_default_unknown'))
+  expect(external.calls.some((call) => call.args[0] === 'set-default-source')).toBe(false)
+})
+
+it('waits for the browser microphone source-output event before accepting its route', async () => {
+  const external = new Processes()
+  const audio = await createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, new Clock()))
+  external.missingRecord = true
+  const opened = external.next('pactl-subscribe')
+  const verifying = audio.verifyRoutes()
+  const subscription = await opened
+  external.missingRecord = false
+  subscription.output.write("Event 'new' on source-output #42\n")
+  await verifying
+  await audio.close()
+})
+
+it('refuses a missing microphone route at the bounded source-output deadline', async () => {
+  const external = new Processes()
+  const timer = new Clock()
+  const audio = await createHuddleAudio('test', () => {}, new HuddleProcesses(external.spawn, timer))
+  external.missingRecord = true
+  const subscribed = external.next('pactl-subscribe')
+  const verifying = audio.verifyRoutes()
+  const refused = verifying.catch((error) => error)
+  await subscribed
+  await timer.next(10_000)
+  timer.fire(10_000)
+  expect(await refused).toEqual(new SlackHuddleError('voice_join_failed', 'audio_device_mismatch'))
+  await audio.close()
 })
 
 it.each(['eof', 'partial', 'overflow', 'epipe'])(

@@ -10,9 +10,12 @@ import { removeHuddleProfile } from './huddle-profile'
 import { huddleClickScript, huddleObservationScript } from './huddle-selectors'
 
 const Empty = z.object({})
-const Evaluation = z.object({ result: z.object({ value: z.unknown() }), exceptionDetails: z.unknown().optional() })
+const Evaluation = z.object({ result: z.object({ value: z.unknown().optional() }), exceptionDetails: z.unknown().optional() })
 const Auth = z.object({ ok: z.literal(true), team_id: z.string(), user_id: z.string() })
-const Click = z.enum(['clicked', 'selector_missing', 'selector_ambiguous', 'control_disabled'])
+const Click = z.union([
+  z.object({ x: z.number(), y: z.number() }),
+  z.enum(['selector_missing', 'selector_ambiguous', 'control_disabled']),
+])
 const Endpoint = /^DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[a-zA-Z0-9-]+)\r?$/
 
 type Terminal = (event: Exclude<SlackHuddleEvent, { type: 'ready' }>) => void
@@ -72,6 +75,8 @@ function launchChromium(
       `--user-data-dir=${profile}`,
       '--no-first-run',
       '--no-default-browser-check',
+      '--use-fake-ui-for-media-stream',
+      '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36',
       '--autoplay-policy=no-user-gesture-required',
       'about:blank',
     ],
@@ -97,7 +102,7 @@ async function preparePage(cdp: HuddleCdp, sessionId: string, input: HuddleStart
     sessionId,
     params: {
       name: 'd',
-      value: input.credentials.cookie,
+      value: input.credentials.cookie.replace(/^d=/, ''),
       domain: '.slack.com',
       path: '/',
       secure: true,
@@ -155,7 +160,7 @@ export async function createHuddleBrowser(
     readonly devices: { readonly receive: string; readonly microphone: string }
     readonly signal: AbortSignal
     readonly terminal: Terminal
-    readonly verifyAudio: () => Promise<void>
+    readonly verifyAudio: (capture: boolean) => Promise<void>
   },
   dependencies: { readonly processes?: HuddleProcesses; readonly connect?: (url: string) => CdpWire } = {},
 ) {
@@ -165,6 +170,8 @@ export async function createHuddleBrowser(
   const observer = new HuddleObserver(input, options.terminal)
   let cdp: HuddleCdp | undefined
   let sessionId: string | undefined
+  let popupId: string | undefined
+  let popupTargetCreated = false
   let closing: Promise<void> | undefined
   const cancelled = () => cdp?.close()
   signal.addEventListener('abort', cancelled, { once: true })
@@ -180,7 +187,7 @@ export async function createHuddleBrowser(
       if (!cdp || !sessionId) throw new SlackHuddleError('voice_join_failed', 'cdp_closed')
       const result = await cdp.command('Runtime.evaluate', Evaluation, {
         sessionId,
-        params: { expression, returnByValue: true, awaitPromise: true },
+        params: { expression, returnByValue: true, awaitPromise: true }, step: invalid,
       })
       if (result.exceptionDetails) throw new SlackHuddleError('voice_join_failed', 'page_script_failed')
       const value = schema.safeParse(result.result.value)
@@ -188,8 +195,23 @@ export async function createHuddleBrowser(
       return value.data
     },
     async click(control) {
-      const result = await page.evaluate(huddleClickScript(control), Click, 'page_state_invalid')
-      if (result !== 'clicked') throw new SlackHuddleError('voice_join_failed', result)
+      const owner = control === 'headerStart' || control === 'leave' || !popupId
+        ? sessionId : popupId
+      if (!cdp || !owner) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
+      const result = await cdp.command('Runtime.evaluate', Evaluation, {
+        sessionId: owner,
+        params: { expression: huddleClickScript(control), returnByValue: true }, step: control,
+      })
+      if (result.exceptionDetails) throw new SlackHuddleError('voice_join_failed', 'page_script_failed')
+      const position = Click.safeParse(result.result.value)
+      if (!position.success) throw new SlackHuddleError('voice_join_failed', 'page_state_invalid')
+      if (typeof position.data === 'string') throw new SlackHuddleError('voice_join_failed', position.data)
+      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+        await cdp.command('Input.dispatchMouseEvent', Empty, {
+          sessionId: owner,
+          params: { type, ...position.data, button: 'left', clickCount: 1 },
+        })
+      }
     },
   }
   const leaveRoom = async () => {
@@ -233,33 +255,93 @@ export async function createHuddleBrowser(
     })
     sessionId = attached.sessionId
     active.observe((method, params, session) => {
-      if (session !== sessionId) return
+      if (method === 'Target.targetCreated') {
+        const created = z.object({ targetInfo: z.object({
+          targetId: z.string(), openerId: z.string().optional(), type: z.string(),
+        }) }).safeParse(params)
+        if (created.success && created.data.targetInfo.openerId === target.targetId &&
+          created.data.targetInfo.type === 'page') {
+          popupTargetCreated = true
+          void active.command('Target.attachToTarget', z.object({ sessionId: z.string() }), {
+            params: { targetId: created.data.targetInfo.targetId, flatten: true },
+          }).then(async ({ sessionId: popup }) => {
+            popupId = popup
+            for (const name of ['Runtime.enable', 'Page.enable', 'Network.enable'])
+              await active.command(name, Empty, { sessionId: popup })
+            await active.command('Runtime.addBinding', Empty, { sessionId: popup, params: { name: 'huddleState' } })
+            await active.command('Page.addScriptToEvaluateOnNewDocument', z.object({ identifier: z.string() }), {
+              sessionId: popup, params: { source: huddleObservationScript },
+            })
+            await active.command('Runtime.evaluate', Evaluation, { sessionId: popup,
+              params: { expression: huddleObservationScript, returnByValue: true }, step: 'popup_observation',
+            })
+          }).catch((error) => fail(huddleFailure(error, 'popup_attach_failed').detail))
+        }
+      }
+      if (session !== sessionId && session !== popupId) return
       try {
-        observer.cdp(method, params)
+        observer.cdp(method, params, session === sessionId ? 'main' : 'popup')
       } catch (error) {
         fail(huddleFailure(error, 'page_state_invalid').detail)
       }
     })
     await preparePage(active, attached.sessionId, input)
-    const preview = page.wait(() => {
-      const state = observer.snapshot
-      return !!state && state.preview + state.join + state.useBoth + state.switchDevice + state.confirmation > 0
+    await active.command('Target.setDiscoverTargets', Empty, {
+      params: { discover: true },
     })
-    await Promise.all([
-      active.command('Page.navigate', z.object({ frameId: z.string() }), {
-        sessionId,
-        params: { url: `https://app.slack.com/huddle/${input.workspaceId}/${input.channelId}` },
-      }),
-      preview,
-    ])
+    const loaded = page.wait(() =>
+      (!!observer.snapshot?.headerStart || !!observer.snapshot?.channelActive) && observer.mainSocketReady)
+    const cancelLoad = processes.clock.after(30_000, () =>
+      abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')))
+    try {
+      observer.beginNavigation()
+      await Promise.all([
+        active.command('Page.navigate', z.object({ frameId: z.string() }), {
+          sessionId, params: { url: `https://app.slack.com/client/${input.workspaceId}/${input.channelId}` },
+        }).then(({ frameId }) => observer.navigated(frameId)),
+        loaded,
+      ])
+    } finally {
+      cancelLoad()
+    }
     await verifyIdentity(page, input)
+    const activeBeforeStart = observer.snapshot?.channelActive === 1 || (observer.snapshot?.roomMembers ?? 0) > 0
+    if (!activeBeforeStart && input.mode === 'join') throw new SlackHuddleError('voice_join_failed', 'room_inactive')
+    const preview = page.wait(() => observer.previewReady())
+    const cancelPreview = processes.clock.after(30_000, () =>
+      abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')))
+    try {
+      await Promise.all([page.click('headerStart'), preview])
+      if (!popupId && observer.snapshot?.useBoth) {
+        observer.admission()
+        await step(page, 'useBoth')
+        if (!popupTargetCreated && observer.snapshot?.headerStart === 1 && observer.snapshot.leave === 0) {
+          await page.click('headerStart')
+        }
+        await page.wait(() => observer.previewReady())
+      }
+    } finally {
+      cancelPreview()
+    }
     await admit(page)
-    await options.verifyAudio()
+    if (input.mode === 'call' && !activeBeforeStart && input.speakerId !== input.seatId) {
+      const cancelRing = processes.clock.after(60_000, () =>
+        abort.abort(new SlackHuddleError('voice_join_failed', 'speaker_no_answer')))
+      try {
+        await page.wait(() => observer.speakerPresent())
+      } finally {
+        cancelRing()
+      }
+    }
     if (signal.aborted) throw huddleFailure(signal.reason, 'join_aborted')
+    if (!observer.joined()) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
+    await options.verifyAudio(false)
     if (!observer.joined()) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
     const unmuted = page.wait(() => observer.snapshot?.muted === false)
     await Promise.all([page.click('microphone'), unmuted])
     // The roster, location and controls may have changed while the unmute was pending.
+    observer.admitted()
+    await options.verifyAudio(true)
     observer.admitted()
     observer.markReady()
     return {
@@ -272,8 +354,9 @@ export async function createHuddleBrowser(
       observer,
     }
   } catch (error) {
+    const failure = signal.aborted ? huddleFailure(signal.reason, 'browser_aborted') : huddleFailure(error, 'browser_failed')
     abort.abort()
     await close()
-    throw huddleFailure(error, 'browser_failed')
+    throw failure
   }
 }
