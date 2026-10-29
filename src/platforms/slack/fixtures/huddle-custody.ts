@@ -10,7 +10,7 @@ const spawn: HuddleSpawn = (command, args) => {
   const script =
     command === 'pactl'
       ? `process.stdout.write(${JSON.stringify(args[0] === 'load-module' ? '123' :
-        args[0] === 'info' ? 'Default Source: auto_null.monitor\n' : '')})`
+        args[0] === 'get-default-source' ? 'auto_null.monitor\n' : '')})`
       : command === 'chromium'
         ? `const {spawn}=require('node:child_process');
          const grandchild=spawn(process.execPath,['-e','process.stdin.resume()'],{stdio:['pipe','inherit','inherit']});

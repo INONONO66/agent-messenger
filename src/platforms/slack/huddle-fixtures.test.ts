@@ -98,12 +98,18 @@ export class Processes {
   readonly failSpawn = new Set<string>()
   failModule = 0
   failUnload = false
+  failDefault = false
+  unsupportedDefault = false
+  missingDefault = false
+  failPlayback = false
   mismatch = false
   missingRecord = false
   drainPlayback = true
   moduleCount = 0
+  readonly sources = new Map<string, string>()
   defaultSource = 'auto_null.monitor'
   readonly spawn: HuddleSpawn = (command, args, env) => {
+    if (command === 'pacat' && this.failPlayback) throw new Error('playback spawn failed')
     const child = new Child(undefined, !this.failSpawn.has(command))
     if (command === 'pacat' && this.drainPlayback) child.input.once('finish', () => child.exit())
     this.calls.push({ command, args, env, child })
@@ -128,14 +134,35 @@ export class Processes {
         return
       }
       child.output.write(String(this.moduleCount))
+      const name = args.find((arg) => arg.startsWith('source_name='))?.slice('source_name='.length)
+      if (name) this.sources.set(String(this.moduleCount), name)
       child.exit()
-    } else if (args[0] === 'info') {
-      child.output.write(`Default Source: ${this.defaultSource}\n`)
+    } else if (args[0] === 'get-default-source') {
+      if (this.unsupportedDefault) {
+        child.errors.write('Unknown command: get-default-source\n')
+        child.exit(1)
+        return
+      }
+      child.output.write(this.missingDefault ? '\n' : `${this.defaultSource}\n`)
+      child.exit()
+    } else if (args[0] === '--format=json' && args[1] === 'info') {
+      child.output.write(JSON.stringify({ default_source_name: this.missingDefault ? '' : this.defaultSource }))
       child.exit()
     } else if (args[0] === 'set-default-source') {
+      if (this.failDefault) {
+        child.exit(1)
+        return
+      }
       this.defaultSource = args[1] ?? this.defaultSource
       child.exit()
-    } else if (args[0] === 'unload-module') child.exit(this.failUnload ? 1 : 0)
+    } else if (args[0] === 'unload-module') {
+      if (!this.failUnload) {
+        const source = this.sources.get(args[1] ?? '')
+        if (source === this.defaultSource) this.defaultSource = 'auto_null.monitor'
+        this.sources.delete(args[1] ?? '')
+      }
+      child.exit(this.failUnload ? 1 : 0)
+    }
     else {
       child.output.write(JSON.stringify(this.listing(args[2])))
       child.exit()
@@ -145,7 +172,10 @@ export class Processes {
     const chromium = this.calls.find((call) => call.command === 'chromium')
     const app = chromium?.env?.PULSE_PROP_OVERRIDE?.slice('application.name='.length) ?? 'huddle_test'
     if (kind === 'sinks') return [{ index: 20, name: chromium?.env?.PULSE_SINK ?? 'oni_huddle_rx_test' }]
-    if (kind === 'sources') return [{ index: 30, name: chromium?.env?.PULSE_SOURCE ?? 'oni_huddle_mic_test' }]
+    if (kind === 'sources') return [
+      { index: 30, name: chromium?.env?.PULSE_SOURCE ?? 'oni_huddle_mic_test' },
+      ...[...this.sources.values()].map((name, index) => ({ index: 31 + index, name })),
+    ]
     if (kind === 'source-outputs' && this.missingRecord) return []
     return [{ sink: this.mismatch ? 99 : 20, source: 30, properties: { 'application.name': app } }]
   }
@@ -205,6 +235,10 @@ export class Wire implements CdpWire {
   responseStatus = 200
   popupOpened = false
   suppressPopup = false
+  inline = false
+  serverError = false
+  redirect: string | undefined
+  subframeStatus = 0
   prePopupConflict = false
   suppressSocket = false
   observationUndefined = false
@@ -278,9 +312,15 @@ export class Wire implements CdpWire {
         break
       case 'Page.navigate':
         result = { frameId: 'frame' }
+        this.event('Page.frameNavigated', { frame: { id: 'frame', url: request.params?.url } })
         this.event('Network.responseReceived', {
-          type: 'Document', response: { url: request.params?.url, status: this.responseStatus },
+          frameId: 'frame', type: 'Document', response: { url: request.params?.url, status: this.responseStatus },
         })
+        if (this.subframeStatus) this.event('Network.responseReceived', {
+          frameId: 'subframe', type: 'Document', response: { url: 'https://app.slack.com/embed', status: this.subframeStatus },
+        })
+        if (this.redirect) this.event('Page.frameNavigated', { frame: { id: 'frame', url: this.redirect } })
+        if (this.serverError) this.main.pageUnavailable = true
         this.mainPage()
         if (!this.suppressSocket) this.event('Network.webSocketFrameReceived', {
           response: { opcode: 1, payloadData: '{}' },
@@ -310,7 +350,7 @@ export class Wire implements CdpWire {
     const controls = ['headerStart', 'previewMicrophone', 'join', 'microphone', 'useBoth', 'leave'] as const
     this.selected = controls.find((name) => expression.includes(JSON.stringify(huddleSelectors[name])))
     if (this.selected === 'headerStart' && sessionId !== 'session') throw new Error('header click on popup')
-    if (this.selected !== 'headerStart' && this.selected !== 'leave' &&
+    if (this.selected !== 'headerStart' && this.selected !== 'leave' && !(this.inline && sessionId === 'session') &&
       !(this.selected === 'useBoth' && this.prePopupConflict) && sessionId !== 'popup') {
       throw new Error('popup click on main')
     }
@@ -325,14 +365,25 @@ export class Wire implements CdpWire {
         this.mainPage()
         return
       }
+      if (this.inline) {
+        this.main = { ...this.state }
+        this.mainPage()
+        return
+      }
       this.popupOpened = true
       this.receive(JSON.stringify({
         method: 'Target.targetCreated',
         params: { targetInfo: { targetId: 'popup-target', openerId: 'target', type: 'page' } },
       }))
-    } else if (this.selected === 'previewMicrophone') this.state.previewMuted = true
+    } else if (this.selected === 'previewMicrophone') {
+      this.state.previewMuted = true
+      if (this.inline) this.main.previewMuted = true
+    }
     else if (this.selected === 'join') this.join()
-    else if (this.selected === 'microphone') this.state.muted = !this.state.muted
+    else if (this.selected === 'microphone') {
+      this.state.muted = !this.state.muted
+      if (this.inline) this.main.muted = this.state.muted
+    }
     else if (this.selected === 'useBoth') {
       if (this.prePopupConflict && sessionId === 'session') {
         this.prePopupConflict = false
@@ -348,6 +399,7 @@ export class Wire implements CdpWire {
   }
   private join() {
     this.state = { ...this.state, preview: 0, join: 0, dialogs: 0 }
+    if (this.inline) this.main = { ...this.state }
     this.main.leave = 1
     this.main.channelActive = 1
     this.main.roomMembers = 1
@@ -361,7 +413,7 @@ export class Wire implements CdpWire {
     }
     this.event('Network.webSocketFrameReceived', {
       response: { opcode: 1, payloadData: JSON.stringify(this.room) },
-    }, 'popup')
+    }, this.inline ? 'session' : 'popup')
   }
   event(method: string, params: object, sessionId = 'session') {
     this.receive(JSON.stringify({ method, params, sessionId }))
@@ -373,7 +425,8 @@ export class Wire implements CdpWire {
     this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.state) }, 'popup')
   }
   page() {
-    this.popupPage()
+    if (this.inline) this.mainPage()
+    else this.popupPage()
   }
   close() {
     this.closed = true

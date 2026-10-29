@@ -3,7 +3,7 @@ export const huddleSelectors = {
   verified: false,
   note: 'Verified live: headerStart, preview, join, previewMicrophone, microphone, muted, leave, channelActive, roomMembers, peers. Unmuted icon, device prompts and confirmation selectors are unverified.',
   headerStart: 'button[data-qa="huddle_channel_header_button__start_button"]',
-  preview: '[role="dialog"]',
+  preview: '[role="dialog"]:has([data-qa="huddle_invite_window_with_preview_content_join_button"])',
   join: '[data-qa="huddle_invite_window_with_preview_content_join_button"]',
   previewMicrophone: '[data-qa="huddle_join_preview_mic_button"]',
   microphone: '[data-qa="segmented-mute-button-main"]',

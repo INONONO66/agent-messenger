@@ -25,8 +25,8 @@ export type HuddleSnapshot = z.infer<typeof HuddleSnapshot>
 const Binding = z.object({ name: z.literal('huddleState'), payload: z.string() })
 const PageState = JsonText.pipe(HuddleSnapshot)
 const Frame = z.object({ response: z.object({ opcode: z.number(), payloadData: z.string() }) })
-const Navigation = z.object({ frame: z.object({ url: z.string(), parentId: z.string().optional() }) })
-const Response = z.object({ response: z.object({ url: z.string(), status: z.number() }), type: z.string() })
+const Navigation = z.object({ frame: z.object({ id: z.string(), url: z.string(), parentId: z.string().optional() }) })
+const Response = z.object({ frameId: z.string(), response: z.object({ url: z.string(), status: z.number() }), type: z.string() })
 
 /** Room evidence and peer tiles are both required; silence/mute is never departure. */
 export class HuddleObserver {
@@ -37,12 +37,22 @@ export class HuddleObserver {
   room: SlackHuddleRoomJoined | undefined
   private present = false
   private ready = false
+  private navigating = false
+  private mainFrameId: string | undefined
   private departed = false
   private readonly waiting = new Set<() => void>()
   constructor(
     readonly input: HuddleRequest,
     private readonly terminal: (event: Exclude<SlackHuddleEvent, { type: 'ready' }>) => void,
   ) {}
+
+  beginNavigation(): void {
+    this.navigating = true
+  }
+
+  navigated(frameId: string): void {
+    this.mainFrameId = frameId
+  }
 
   changed(): void {
     for (const wake of this.waiting) wake()
@@ -94,7 +104,8 @@ export class HuddleObserver {
       }
       case 'Network.responseReceived': {
         const response = Response.safeParse(params)
-        if (source === 'main' && response.success && response.data.type === 'Document' &&
+        if (source === 'main' && response.success && response.data.frameId === this.mainFrameId &&
+          response.data.type === 'Document' &&
           response.data.response.status >= 400) {
           throw new SlackHuddleError('voice_join_failed', 'page_unavailable')
         }
@@ -103,12 +114,19 @@ export class HuddleObserver {
       case 'Page.frameNavigated': {
         const navigation = Navigation.parse(params)
         const current = source === 'main' ? this.main : this.popup
-        if (!navigation.frame.parentId && current) {
-          const established = current.url.startsWith(
-            `https://app.slack.com/client/${this.input.workspaceId}/${this.input.channelId}`,
-          )
-          this.page({ ...current, url: navigation.frame.url }, source)
-          if (established) this.checkLocation()
+        if (!navigation.frame.parentId) {
+          if (source === 'main') this.mainFrameId = navigation.frame.id
+          if (source === 'main' && this.navigating) {
+            const url = new URL(navigation.frame.url)
+            if (url.origin !== 'https://app.slack.com' ||
+              url.pathname !== `/client/${this.input.workspaceId}/${this.input.channelId}`) {
+              const reason = url.origin === 'https://app.slack.com' &&
+                url.pathname.startsWith(`/client/${this.input.workspaceId}/`)
+                ? 'navigation_changed' : 'page_unavailable:signin'
+              throw new SlackHuddleError('voice_join_failed', reason)
+            }
+          }
+          if (current) this.page({ ...current, url: navigation.frame.url }, source)
         }
         break
       }
@@ -236,7 +254,6 @@ export class HuddleObserver {
     if (state.confirmation || state.dialogs > state.preview) {
       throw new SlackHuddleError('voice_join_failed', 'access_request')
     }
-    if (!this.popup) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
     if (this.input.mode === 'join' && this.main?.roomMembers === 0 && this.main.channelActive !== 1) {
       throw new SlackHuddleError('voice_join_failed', 'room_inactive')
     }
@@ -255,9 +272,10 @@ export class HuddleObserver {
   }
 
   previewReady(): boolean {
-    return this.popup?.url.startsWith(`https://app.slack.com/client/${this.input.workspaceId}/${this.input.channelId}`) === true &&
-      (this.popup.join > 0 || this.popup.useBoth > 0 || this.popup.switchDevice > 0 || this.popup.confirmation > 0 ||
-        this.popup.preview > 0)
+    const owner = this.popup ?? this.main
+    return owner?.url.startsWith(`https://app.slack.com/client/${this.input.workspaceId}/${this.input.channelId}`) === true &&
+      (owner.join > 0 || owner.useBoth > 0 || owner.switchDevice > 0 || owner.confirmation > 0 ||
+        owner.preview > 0)
   }
 
   joined(): boolean {

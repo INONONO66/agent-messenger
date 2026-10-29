@@ -15,8 +15,8 @@ function fixture() {
   let verified = 0
   const open = (
     input = start,
-    verifyAudio = async () => {
-      expect(wire.state.muted).toBe(false)
+    verifyAudio = async (capture: boolean) => {
+      expect(wire.state.muted).toBe(!capture)
       verified++
     },
   ) =>
@@ -40,7 +40,7 @@ it('subscribes before navigation, joins muted, unmutes, then verifies actual dev
   const methods = f.wire.requests.map((request) => request.method)
   expect(methods.indexOf('Runtime.addBinding')).toBeLessThan(methods.indexOf('Page.navigate'))
   expect(methods.indexOf('Network.enable')).toBeLessThan(methods.indexOf('Page.navigate'))
-  expect(f.verified()).toBe(1)
+  expect(f.verified()).toBe(2)
   expect(f.wire.state.muted).toBe(false)
   const commands = JSON.stringify(f.external.calls.map(({ command, args, env }) => ({ command, args, env })))
   expect(commands).not.toContain(start.credentials.token)
@@ -78,6 +78,49 @@ it.each([500, 403])('fails fast for main document status %d', async (status) => 
   f.wire.responseStatus = status
   await expect(f.open()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'page_unavailable'))
   expect(f.wire.popupOpened).toBe(false)
+})
+
+it('ignores a failed subframe document in a healthy channel', async () => {
+  const f = fixture()
+  f.wire.subframeStatus = 404
+  const browser = await f.open()
+  expect(f.wire.state.muted).toBe(false)
+  await browser.close()
+})
+
+it.each(['https://app.slack.com/signin', 'https://app.slack.com/workspace/signin'])(
+  'refuses initial redirect to %s before waiting for join', async (redirect) => {
+    const f = fixture()
+    f.wire.redirect = redirect
+    await expect(f.open()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'page_unavailable:signin'))
+    expect(f.wire.popupOpened).toBe(false)
+  },
+)
+
+it('accepts a navigation to the channel with query parameters', async () => {
+  const f = fixture()
+  f.wire.redirect = 'https://app.slack.com/client/T1/C1?source=header'
+  const browser = await f.open()
+  expect(f.wire.state.muted).toBe(false)
+  await browser.close()
+})
+
+it('refuses a Server Error document even when HTTP reports success', async () => {
+  const f = fixture()
+  f.wire.serverError = true
+  await expect(f.open()).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'page_unavailable'))
+  expect(f.wire.popupOpened).toBe(false)
+})
+
+it('joins an active public channel when the preview renders inline', async () => {
+  const f = fixture()
+  f.wire.inline = true
+  const browser = await f.open()
+  expect(f.wire.popupOpened).toBe(false)
+  expect(f.wire.main.muted).toBe(false)
+  expect(f.wire.requests.some((request) => request.method === 'Input.dispatchMouseEvent' &&
+    request.sessionId === 'session')).toBe(true)
+  await browser.close()
 })
 
 it('uses trusted CDP clicks on each owning page after attaching the popup', async () => {
@@ -163,7 +206,7 @@ it('call mode waits for speaker in both room evidence and popup tiles', async ()
     response: { opcode: 1, payloadData: JSON.stringify(room) },
   }, 'popup')
   const browser = await joining
-  expect(f.verified()).toBe(1)
+  expect(f.verified()).toBe(2)
   await browser.close()
 })
 
@@ -220,6 +263,7 @@ it('microphone route mismatch refuses readiness and terminates the browser', asy
   ).rejects.toEqual(new SlackHuddleError('voice_join_failed', 'audio_device_mismatch'))
   expect(f.wire.requests.filter((request) =>
     request.method === 'Input.dispatchMouseEvent' && request.sessionId === 'popup').length).toBeGreaterThan(0)
+  expect(f.wire.state.muted).toBe(true)
   expect(f.external.calls.every((call) => call.child.killed)).toBe(true)
 })
 
@@ -230,7 +274,7 @@ it('navigation while waiting for room evidence fails rather than joining another
   const joining = f.open()
   const rejected = joining.catch((error) => error)
   await evaluation
-  f.wire.event('Page.frameNavigated', { frame: { url: 'https://app.slack.com/client/T1/C2' } })
+  f.wire.event('Page.frameNavigated', { frame: { id: 'frame', url: 'https://app.slack.com/client/T1/C2' } })
   expect(await rejected).toBeInstanceOf(SlackHuddleError)
   expect(f.events).toContainEqual({ type: 'error', reason: 'navigation_changed' })
 })

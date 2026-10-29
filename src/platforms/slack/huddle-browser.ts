@@ -160,7 +160,7 @@ export async function createHuddleBrowser(
     readonly devices: { readonly receive: string; readonly microphone: string }
     readonly signal: AbortSignal
     readonly terminal: Terminal
-    readonly verifyAudio: () => Promise<void>
+    readonly verifyAudio: (capture: boolean) => Promise<void>
   },
   dependencies: { readonly processes?: HuddleProcesses; readonly connect?: (url: string) => CdpWire } = {},
 ) {
@@ -195,7 +195,7 @@ export async function createHuddleBrowser(
       return value.data
     },
     async click(control) {
-      const owner = control === 'headerStart' || control === 'leave' || (control === 'useBoth' && !popupId)
+      const owner = control === 'headerStart' || control === 'leave' || !popupId
         ? sessionId : popupId
       if (!cdp || !owner) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
       const result = await cdp.command('Runtime.evaluate', Evaluation, {
@@ -294,10 +294,11 @@ export async function createHuddleBrowser(
     const cancelLoad = processes.clock.after(30_000, () =>
       abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')))
     try {
+      observer.beginNavigation()
       await Promise.all([
         active.command('Page.navigate', z.object({ frameId: z.string() }), {
           sessionId, params: { url: `https://app.slack.com/client/${input.workspaceId}/${input.channelId}` },
-        }),
+        }).then(({ frameId }) => observer.navigated(frameId)),
         loaded,
       ])
     } finally {
@@ -306,7 +307,7 @@ export async function createHuddleBrowser(
     await verifyIdentity(page, input)
     const activeBeforeStart = observer.snapshot?.channelActive === 1 || (observer.snapshot?.roomMembers ?? 0) > 0
     if (!activeBeforeStart && input.mode === 'join') throw new SlackHuddleError('voice_join_failed', 'room_inactive')
-    const preview = page.wait(() => observer.previewReady() || (!popupId && observer.snapshot?.useBoth === 1))
+    const preview = page.wait(() => observer.previewReady())
     const cancelPreview = processes.clock.after(30_000, () =>
       abort.abort(new SlackHuddleError('voice_join_failed', 'join_timeout')))
     try {
@@ -334,11 +335,13 @@ export async function createHuddleBrowser(
     }
     if (signal.aborted) throw huddleFailure(signal.reason, 'join_aborted')
     if (!observer.joined()) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
+    await options.verifyAudio(false)
+    if (!observer.joined()) throw new SlackHuddleError('voice_join_failed', 'selector_missing')
     const unmuted = page.wait(() => observer.snapshot?.muted === false)
     await Promise.all([page.click('microphone'), unmuted])
     // The roster, location and controls may have changed while the unmute was pending.
     observer.admitted()
-    await options.verifyAudio()
+    await options.verifyAudio(true)
     observer.admitted()
     observer.markReady()
     return {
