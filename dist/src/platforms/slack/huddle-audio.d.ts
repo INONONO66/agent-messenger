@@ -17,6 +17,6 @@ export declare function createHuddleAudio(key: string, onFailure: (detail: strin
     write: (pcm: Uint8Array) => Promise<void>;
     startCapture: () => Promise<void>;
     close: () => Promise<void>;
-    verifyRoutes(): Promise<void>;
+    verifyRoutes(capture?: boolean): Promise<void>;
 }>;
 //# sourceMappingURL=huddle-audio.d.ts.map

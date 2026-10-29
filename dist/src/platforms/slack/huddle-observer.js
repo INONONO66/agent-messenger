@@ -1,16 +1,17 @@
 import { z } from 'zod';
 import { huddleFailure, JsonText, SlackHuddleError } from './huddle-contract.js';
-import { huddleSelectors } from './huddle-selectors.js';
 import { SlackHuddleRoomJoinedSchema } from './types.js';
 export const HuddleSnapshot = z.object({
     url: z.string(),
+    pageUnavailable: z.boolean(),
+    headerStart: z.number().int().nonnegative(),
     preview: z.number().int().nonnegative(),
     join: z.number().int().nonnegative(),
-    joinText: z.string(),
     previewMuted: z.boolean().nullable(),
     muted: z.boolean().nullable(),
     leave: z.number().int().nonnegative(),
     channelActive: z.number().int().nonnegative(),
+    roomMembers: z.number().int().nonnegative(),
     useBoth: z.number().int().nonnegative(),
     switchDevice: z.number().int().nonnegative(),
     confirmation: z.number().int().nonnegative(),
@@ -20,20 +21,32 @@ export const HuddleSnapshot = z.object({
 const Binding = z.object({ name: z.literal('huddleState'), payload: z.string() });
 const PageState = JsonText.pipe(HuddleSnapshot);
 const Frame = z.object({ response: z.object({ opcode: z.number(), payloadData: z.string() }) });
-const Navigation = z.object({ frame: z.object({ url: z.string(), parentId: z.string().optional() }) });
+const Navigation = z.object({ frame: z.object({ id: z.string(), url: z.string(), parentId: z.string().optional() }) });
+const Response = z.object({ frameId: z.string(), response: z.object({ url: z.string(), status: z.number() }), type: z.string() });
 /** Room evidence and peer tiles are both required; silence/mute is never departure. */
 export class HuddleObserver {
     input;
     terminal;
     snapshot;
+    mainSocketReady = false;
+    main;
+    popup;
     room;
     present = false;
     ready = false;
+    navigating = false;
+    mainFrameId;
     departed = false;
     waiting = new Set();
     constructor(input, terminal) {
         this.input = input;
         this.terminal = terminal;
+    }
+    beginNavigation() {
+        this.navigating = true;
+    }
+    navigated(frameId) {
+        this.mainFrameId = frameId;
     }
     changed() {
         for (const wake of this.waiting)
@@ -70,31 +83,55 @@ export class HuddleObserver {
             check();
         });
     }
-    cdp(method, params) {
+    cdp(method, params, source = 'main') {
         switch (method) {
             case 'Runtime.bindingCalled': {
                 const binding = Binding.safeParse(params);
                 if (binding.success)
-                    this.page(this.state(binding.data.payload));
+                    this.page(this.state(binding.data.payload), source);
                 break;
             }
             case 'Network.webSocketFrameReceived': {
                 const frame = Frame.parse(params);
+                if (source === 'main')
+                    this.mainSocketReady = true;
                 if (frame.response.opcode === 1)
                     this.frame(frame.response.payloadData);
+                this.changed();
+                break;
+            }
+            case 'Network.responseReceived': {
+                const response = Response.safeParse(params);
+                if (source === 'main' && response.success && response.data.frameId === this.mainFrameId &&
+                    response.data.type === 'Document' &&
+                    response.data.response.status >= 400) {
+                    throw new SlackHuddleError('voice_join_failed', 'page_unavailable');
+                }
                 break;
             }
             case 'Page.frameNavigated': {
                 const navigation = Navigation.parse(params);
-                if (!navigation.frame.parentId && this.snapshot) {
-                    this.page({ ...this.snapshot, url: navigation.frame.url });
-                    this.checkLocation();
+                const current = source === 'main' ? this.main : this.popup;
+                if (!navigation.frame.parentId) {
+                    if (source === 'main')
+                        this.mainFrameId = navigation.frame.id;
+                    if (source === 'main' && this.navigating) {
+                        const url = new URL(navigation.frame.url);
+                        if (url.origin !== 'https://app.slack.com' ||
+                            url.pathname !== `/client/${this.input.workspaceId}/${this.input.channelId}`) {
+                            const reason = url.origin === 'https://app.slack.com' &&
+                                url.pathname.startsWith(`/client/${this.input.workspaceId}/`)
+                                ? 'navigation_changed' : 'page_unavailable:signin';
+                            throw new SlackHuddleError('voice_join_failed', reason);
+                        }
+                    }
+                    if (current)
+                        this.page({ ...current, url: navigation.frame.url }, source);
                 }
                 break;
             }
             case 'Inspector.targetCrashed':
             case 'Inspector.detached':
-            case 'Page.frameDetached':
                 throw new SlackHuddleError('voice_join_failed', 'browser_disconnected');
         }
     }
@@ -112,10 +149,29 @@ export class HuddleObserver {
         if (event.success)
             this.wire(event.data);
     }
-    page(state) {
-        this.snapshot = state;
+    page(state, source = 'main') {
+        if (source === 'main') {
+            this.main = state;
+            if (state.pageUnavailable) {
+                throw new SlackHuddleError('voice_join_failed', 'page_unavailable');
+            }
+        }
+        else
+            this.popup = state;
+        const main = this.main;
+        const popup = this.popup;
+        if (!main)
+            return;
+        this.snapshot = {
+            ...(popup ?? main),
+            headerStart: main.headerStart,
+            channelActive: main.channelActive,
+            roomMembers: main.roomMembers,
+            leave: main.leave,
+        };
+        const merged = this.snapshot;
         if (this.ready) {
-            if (state.leave === 0) {
+            if (merged.leave === 0) {
                 this.terminal({ type: 'disconnected', reason: 'room_left' });
                 this.changed();
                 return;
@@ -149,11 +205,14 @@ export class HuddleObserver {
         this.changed();
     }
     checkLocation() {
-        const url = new URL(this.snapshot?.url ?? 'about:blank');
         const { workspaceId, channelId } = this.input;
-        if (url.origin !== 'https://app.slack.com' ||
-            ![`/huddle/${workspaceId}/${channelId}`, `/client/${workspaceId}/${channelId}`].includes(url.pathname)) {
-            throw new SlackHuddleError('voice_join_failed', 'navigation_changed');
+        for (const state of [this.main, this.popup]) {
+            if (!state)
+                continue;
+            const url = new URL(state.url);
+            if (url.origin !== 'https://app.slack.com' || url.pathname !== `/client/${workspaceId}/${channelId}`) {
+                throw new SlackHuddleError('voice_join_failed', 'navigation_changed');
+            }
         }
     }
     isolated() {
@@ -198,16 +257,27 @@ export class HuddleObserver {
         if (state.confirmation || state.dialogs > state.preview) {
             throw new SlackHuddleError('voice_join_failed', 'access_request');
         }
-        if (state.joinText === huddleSelectors.startText)
+        if (this.input.mode === 'join' && this.main?.roomMembers === 0 && this.main.channelActive !== 1) {
             throw new SlackHuddleError('voice_join_failed', 'room_inactive');
+        }
         if (state.preview > 1 || state.join > 1)
             throw new SlackHuddleError('voice_join_failed', 'selector_ambiguous');
         if (state.preview !== 1 || state.join !== 1 || state.previewMuted === null) {
             throw new SlackHuddleError('voice_join_failed', 'selector_missing');
         }
-        if (state.joinText !== huddleSelectors.joinText)
-            throw new SlackHuddleError('voice_join_failed', 'room_inactive');
         return state.previewMuted ? 'join' : 'mute';
+    }
+    speakerPresent() {
+        const { speakerId, seatId } = this.input;
+        return !!this.room && this.snapshot?.peers.includes(speakerId) === true &&
+            this.room.room.participants.includes(speakerId) &&
+            this.snapshot.peers.includes(seatId) && this.room.room.participants.includes(seatId);
+    }
+    previewReady() {
+        const owner = this.popup ?? this.main;
+        return owner?.url.startsWith(`https://app.slack.com/client/${this.input.workspaceId}/${this.input.channelId}`) === true &&
+            (owner.join > 0 || owner.useBoth > 0 || owner.switchDevice > 0 || owner.confirmation > 0 ||
+                owner.preview > 0);
     }
     joined() {
         const state = this.snapshot;
@@ -233,7 +303,8 @@ export class HuddleObserver {
         if (state.dialogs || state.confirmation || state.useBoth || state.switchDevice) {
             throw new SlackHuddleError('voice_join_failed', 'confirmation_pending');
         }
-        this.isolated();
+        if (this.input.mode !== 'call' || this.speakerPresent())
+            this.isolated();
         const microphone = muted ? 'microphone_not_muted' : 'microphone_not_unmuted';
         if (state.muted !== muted)
             throw new SlackHuddleError('voice_join_failed', microphone);

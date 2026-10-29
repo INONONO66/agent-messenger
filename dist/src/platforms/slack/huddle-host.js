@@ -94,7 +94,7 @@ export function runHuddleHost(channel, dependencies = {}) {
                 devices: audio.devices,
                 signal: abort.signal,
                 terminal,
-                verifyAudio: () => activeAudio.verifyRoutes(),
+                verifyAudio: (capture) => activeAudio.verifyRoutes(capture),
             }, { processes: browserProcesses, connect: dependencies.connect });
             if (abort.signal.aborted || stopping)
                 return;

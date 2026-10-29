@@ -4,13 +4,15 @@ import { type HuddleRequest, type SlackHuddleEvent } from './huddle-contract.js'
 import { type SlackHuddleRoomJoined } from './types.js';
 export declare const HuddleSnapshot: z.ZodObject<{
     url: z.ZodString;
+    pageUnavailable: z.ZodBoolean;
+    headerStart: z.ZodNumber;
     preview: z.ZodNumber;
     join: z.ZodNumber;
-    joinText: z.ZodString;
     previewMuted: z.ZodNullable<z.ZodBoolean>;
     muted: z.ZodNullable<z.ZodBoolean>;
     leave: z.ZodNumber;
     channelActive: z.ZodNumber;
+    roomMembers: z.ZodNumber;
     useBoth: z.ZodNumber;
     switchDevice: z.ZodNumber;
     confirmation: z.ZodNumber;
@@ -23,25 +25,34 @@ export declare class HuddleObserver {
     readonly input: HuddleRequest;
     private readonly terminal;
     snapshot: HuddleSnapshot | undefined;
+    mainSocketReady: boolean;
+    private main;
+    private popup;
     room: SlackHuddleRoomJoined | undefined;
     private present;
     private ready;
+    private navigating;
+    private mainFrameId;
     private departed;
     private readonly waiting;
     constructor(input: HuddleRequest, terminal: (event: Exclude<SlackHuddleEvent, {
         type: 'ready';
     }>) => void);
+    beginNavigation(): void;
+    navigated(frameId: string): void;
     changed(): void;
     subscribe(wake: () => void): () => void;
     wait(signal: AbortSignal, predicate: () => boolean): Promise<void>;
-    cdp(method: string, params: CdpFields): void;
+    cdp(method: string, params: CdpFields, source?: 'main' | 'popup'): void;
     private state;
     private frame;
-    page(state: HuddleSnapshot): void;
+    page(state: HuddleSnapshot, source?: 'main' | 'popup'): void;
     wire(event: SlackHuddleRoomJoined): void;
     checkLocation(): void;
     isolated(): void;
     admission(): 'both' | 'mute' | 'join';
+    speakerPresent(): boolean;
+    previewReady(): boolean;
     joined(): boolean;
     /** Re-checks the joined room after unmute, immediately before readiness is published. */
     admitted(): void;

@@ -13,7 +13,7 @@ export declare function createHuddleBrowser(input: HuddleStart, options: {
     };
     readonly signal: AbortSignal;
     readonly terminal: Terminal;
-    readonly verifyAudio: () => Promise<void>;
+    readonly verifyAudio: (capture: boolean) => Promise<void>;
 }, dependencies?: {
     readonly processes?: HuddleProcesses;
     readonly connect?: (url: string) => CdpWire;
