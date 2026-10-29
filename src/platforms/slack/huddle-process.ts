@@ -91,6 +91,7 @@ export class HuddleProcesses {
   async command(command: string, args: readonly string[]): Promise<string> {
     const child = this.open(command, args)
     let output = ''
+    let errors = ''
     let failed = false
     const cancel = this.clock.after(2_000, () => {
       failed = true
@@ -109,10 +110,18 @@ export class HuddleProcesses {
     child.output.on('error', () => {
       failed = true
     })
-    child.errors.resume()
+    if (command === 'pactl' && args[0] === 'get-default-source') {
+      child.errors.on('data', (data: Buffer) => {
+        errors += data.toString('utf8')
+      })
+    } else child.errors.resume()
     try {
       const result = await child.exited
-      if (failed || result.code !== 0) throw new SlackHuddleError('voice_join_failed', 'audio_command_failed')
+      if (failed || result.code !== 0) {
+        const unsupported = !failed && command === 'pactl' && args[0] === 'get-default-source' &&
+          /(?:unknown|invalid|unrecognized) command/i.test(errors)
+        throw new SlackHuddleError('voice_join_failed', unsupported ? 'audio_command_unsupported' : 'audio_command_failed')
+      }
       return output.trim()
     } finally {
       cancel()

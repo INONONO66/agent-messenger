@@ -1,32 +1,79 @@
 import { expect, it } from 'bun:test'
+import { runInNewContext } from 'node:vm'
 
 import { SlackHuddleError, type SlackHuddleEvent } from './huddle-contract'
 import { room, snapshot, start } from './huddle-fixtures.test'
 import { HuddleObserver } from './huddle-observer'
+import { huddleObservationScript } from './huddle-selectors'
 
 it('requires correlated room membership and a muted in-room control before readiness', () => {
   const observed = new HuddleObserver(start, () => {})
   observed.page(snapshot)
+  observed.page(snapshot, 'popup')
   expect(observed.admission()).toBe('mute')
-  observed.page({ ...snapshot, previewMuted: true })
+  observed.page({ ...snapshot, previewMuted: true }, 'popup')
   expect(observed.admission()).toBe('join')
   expect(observed.joined()).toBe(false)
   observed.wire(room)
   observed.page({ ...snapshot, leave: 1, dialogs: 0 })
+  observed.page({ ...snapshot, dialogs: 0 }, 'popup')
   expect(observed.joined()).toBe(true)
 })
 
+it('keeps main header evidence while popup owns preview and peer tiles', () => {
+  const observed = new HuddleObserver(start, () => {})
+  observed.page({ ...snapshot, preview: 0, join: 0, peers: [], leave: 1 })
+  observed.page({ ...snapshot, channelActive: 0, leave: 0, roomMembers: 0 }, 'popup')
+  expect(observed.snapshot).toMatchObject({
+    preview: 1, join: 1, peers: ['U1', 'U2'], channelActive: 1, leave: 1, roomMembers: 1,
+  })
+  expect(observed.admission()).toBe('mute')
+})
+
+it('accepts an inline preview as the owner of join controls', () => {
+  const observed = new HuddleObserver(start, () => {})
+  observed.page(snapshot)
+  expect(observed.previewReady()).toBe(true)
+  expect(observed.admission()).toBe('mute')
+})
+
+it.each(['title', 'body'])('refuses the Server Error document detected from its %s', (location) => {
+  const observed = new HuddleObserver(start, () => {})
+  const document = {
+    title: location === 'title' ? 'Server Error' : '',
+    body: { textContent: location === 'body' ? 'Server Error' : '' },
+    querySelectorAll: () => [],
+  }
+  expect(() => runInNewContext(huddleObservationScript, {
+    document,
+    location: { href: snapshot.url },
+    MutationObserver: class { observe() {} },
+    addEventListener: () => {},
+    huddleState: (payload: string) => observed.cdp('Runtime.bindingCalled', { name: 'huddleState', payload }),
+  })).toThrow(new SlackHuddleError('voice_join_failed', 'page_unavailable'))
+})
+
+it('accepts the popup client URL and refuses its navigation to a different channel', () => {
+  const observed = new HuddleObserver(start, () => {})
+  observed.page(snapshot)
+  observed.page(snapshot, 'popup')
+  expect(observed.admission()).toBe('mute')
+  observed.page({ ...snapshot, url: 'https://app.slack.com/client/T1/C2' }, 'popup')
+  expect(() => observed.admission()).toThrow(new SlackHuddleError('voice_join_failed', 'navigation_changed'))
+})
+
 it.each([
-  [{ joinText: 'Start' }, 'voice_join_failed', 'room_inactive'],
   [{ join: 0 }, 'voice_join_failed', 'selector_missing'],
   [{ preview: 2 }, 'voice_join_failed', 'selector_ambiguous'],
   [{ join: 2 }, 'voice_join_failed', 'selector_ambiguous'],
   [{ confirmation: 1 }, 'voice_join_failed', 'access_request'],
+  [{ dialogs: 2 }, 'voice_join_failed', 'access_request'],
   [{ useBoth: 1, switchDevice: 1 }, 'voice_busy', 'multi_device'],
   [{ url: 'https://app.slack.com/client/T1/C2' }, 'voice_join_failed', 'navigation_changed'],
 ])('refuses unsafe admission state %j', (patch, code, detail) => {
   const observed = new HuddleObserver(start, () => {})
   observed.page({ ...snapshot, ...patch })
+  observed.page({ ...snapshot, ...patch }, 'popup')
   expect(() => observed.admission()).toThrow(new SlackHuddleError(code, detail))
 })
 

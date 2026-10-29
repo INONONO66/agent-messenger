@@ -32,12 +32,20 @@ export function deferred<T>() {
 
 export class Clock implements HuddleClock {
   readonly pending = new Set<{ ms: number; action: () => void }>()
+  readonly scheduled = new Map<number, ReturnType<typeof deferred<void>>>()
   after(ms: number, action: () => void) {
     const entry = { ms, action }
     this.pending.add(entry)
+    this.scheduled.get(ms)?.resolve()
     return () => {
       this.pending.delete(entry)
     }
+  }
+  next(ms: number): Promise<void> {
+    if ([...this.pending].some((entry) => entry.ms === ms)) return Promise.resolve()
+    const signal = deferred<void>()
+    this.scheduled.set(ms, signal)
+    return signal.promise
   }
   fire(ms: number) {
     const due = [...this.pending].filter((entry) => entry.ms === ms)
@@ -90,18 +98,26 @@ export class Processes {
   readonly failSpawn = new Set<string>()
   failModule = 0
   failUnload = false
+  failDefault = false
+  unsupportedDefault = false
+  missingDefault = false
+  failPlayback = false
   mismatch = false
+  missingRecord = false
   drainPlayback = true
   moduleCount = 0
+  readonly sources = new Map<string, string>()
+  defaultSource = 'auto_null.monitor'
   readonly spawn: HuddleSpawn = (command, args, env) => {
+    if (command === 'pacat' && this.failPlayback) throw new Error('playback spawn failed')
     const child = new Child(undefined, !this.failSpawn.has(command))
     if (command === 'pacat' && this.drainPlayback) child.input.once('finish', () => child.exit())
     this.calls.push({ command, args, env, child })
-    this.opened.get(command)?.resolve(child)
+    this.opened.get(command === 'pactl' && args[0] === 'subscribe' ? 'pactl-subscribe' : command)?.resolve(child)
     queueMicrotask(() => {
       if (command === 'chromium') {
         child.errors.write('DevTools listening on ws://127.0.0.1:9222/devtools/browser/fixture\n')
-      } else if (command === 'pactl') this.pactl(args, child)
+      } else if (command === 'pactl' && args[0] !== 'subscribe') this.pactl(args, child)
     })
     return child
   }
@@ -118,8 +134,35 @@ export class Processes {
         return
       }
       child.output.write(String(this.moduleCount))
+      const name = args.find((arg) => arg.startsWith('source_name='))?.slice('source_name='.length)
+      if (name) this.sources.set(String(this.moduleCount), name)
       child.exit()
-    } else if (args[0] === 'unload-module') child.exit(this.failUnload ? 1 : 0)
+    } else if (args[0] === 'get-default-source') {
+      if (this.unsupportedDefault) {
+        child.errors.write('Unknown command: get-default-source\n')
+        child.exit(1)
+        return
+      }
+      child.output.write(this.missingDefault ? '\n' : `${this.defaultSource}\n`)
+      child.exit()
+    } else if (args[0] === '--format=json' && args[1] === 'info') {
+      child.output.write(JSON.stringify({ default_source_name: this.missingDefault ? '' : this.defaultSource }))
+      child.exit()
+    } else if (args[0] === 'set-default-source') {
+      if (this.failDefault) {
+        child.exit(1)
+        return
+      }
+      this.defaultSource = args[1] ?? this.defaultSource
+      child.exit()
+    } else if (args[0] === 'unload-module') {
+      if (!this.failUnload) {
+        const source = this.sources.get(args[1] ?? '')
+        if (source === this.defaultSource) this.defaultSource = 'auto_null.monitor'
+        this.sources.delete(args[1] ?? '')
+      }
+      child.exit(this.failUnload ? 1 : 0)
+    }
     else {
       child.output.write(JSON.stringify(this.listing(args[2])))
       child.exit()
@@ -129,7 +172,11 @@ export class Processes {
     const chromium = this.calls.find((call) => call.command === 'chromium')
     const app = chromium?.env?.PULSE_PROP_OVERRIDE?.slice('application.name='.length) ?? 'huddle_test'
     if (kind === 'sinks') return [{ index: 20, name: chromium?.env?.PULSE_SINK ?? 'oni_huddle_rx_test' }]
-    if (kind === 'sources') return [{ index: 30, name: chromium?.env?.PULSE_SOURCE ?? 'oni_huddle_mic_test' }]
+    if (kind === 'sources') return [
+      { index: 30, name: chromium?.env?.PULSE_SOURCE ?? 'oni_huddle_mic_test' },
+      ...[...this.sources.values()].map((name, index) => ({ index: 31 + index, name })),
+    ]
+    if (kind === 'source-outputs' && this.missingRecord) return []
     return [{ sink: this.mismatch ? 99 : 20, source: 30, properties: { 'application.name': app } }]
   }
 }
@@ -140,6 +187,7 @@ export const fixtureProfileRoot = join(tmpdir(), `agent-messenger-slack-huddle-t
 export const removeFixtureProfileRoot = () => rm(fixtureProfileRoot, { recursive: true, force: true })
 export const request: HuddleRequest = {
   type: 'start',
+  mode: 'join',
   workspaceId: 'T1',
   channelId: 'C1',
   speakerId: 'U1',
@@ -148,14 +196,16 @@ export const request: HuddleRequest = {
 }
 export const start: HuddleStart = { ...request, profile: join(fixtureProfileRoot, 'unit-profile') }
 export const snapshot: HuddleSnapshot = {
-  url: 'https://app.slack.com/huddle/T1/C1',
+  url: 'https://app.slack.com/client/T1/C1',
+  pageUnavailable: false,
+  headerStart: 1,
   preview: 1,
   join: 1,
-  joinText: 'Join',
   previewMuted: false,
   muted: true,
   leave: 0,
   channelActive: 1,
+  roomMembers: 1,
   useBoth: 0,
   switchDevice: 0,
   confirmation: 0,
@@ -181,6 +231,18 @@ export class Wire implements CdpWire {
   readonly opened = Promise.resolve()
   readonly requests: Request[] = []
   state = { ...snapshot }
+  main = { ...snapshot, preview: 0, join: 0, dialogs: 0, peers: [], muted: null, previewMuted: null }
+  responseStatus = 200
+  popupOpened = false
+  suppressPopup = false
+  inline = false
+  serverError = false
+  redirect: string | undefined
+  subframeStatus = 0
+  prePopupConflict = false
+  suppressSocket = false
+  observationUndefined = false
+  answer = true
   auth = { ok: true, team_id: 'T1', user_id: 'U2' }
   room = structuredClone(room)
   hold = new Set<string>()
@@ -235,7 +297,12 @@ export class Wire implements CdpWire {
         result = { targetId: 'target' }
         break
       case 'Target.attachToTarget':
-        result = { sessionId: 'session' }
+        result = { sessionId: request.params?.targetId === 'popup-target' ? 'popup' : 'session' }
+        break
+      case 'Target.setAutoAttach':
+        break
+      case 'Runtime.runIfWaitingForDebugger':
+        this.popupPage()
         break
       case 'Network.setCookie':
         result = { success: true }
@@ -245,50 +312,121 @@ export class Wire implements CdpWire {
         break
       case 'Page.navigate':
         result = { frameId: 'frame' }
-        this.page()
+        this.event('Page.frameNavigated', { frame: { id: 'frame', url: request.params?.url } })
+        this.event('Network.responseReceived', {
+          frameId: 'frame', type: 'Document', response: { url: request.params?.url, status: this.responseStatus },
+        })
+        if (this.subframeStatus) this.event('Network.responseReceived', {
+          frameId: 'subframe', type: 'Document', response: { url: 'https://app.slack.com/embed', status: this.subframeStatus },
+        })
+        if (this.redirect) this.event('Page.frameNavigated', { frame: { id: 'frame', url: this.redirect } })
+        if (this.serverError) this.main.pageUnavailable = true
+        this.mainPage()
+        if (!this.suppressSocket) this.event('Network.webSocketFrameReceived', {
+          response: { opcode: 1, payloadData: '{}' },
+        })
         break
       case 'Runtime.evaluate':
-        result = this.evaluate(z.string().parse(request.params?.expression))
+        result = this.evaluate(z.string().parse(request.params?.expression), request.sessionId)
+        break
+      case 'Input.dispatchMouseEvent':
+        if (request.params?.type === 'mouseReleased') this.click(request.sessionId)
         break
     }
     this.receive(JSON.stringify({ id: request.id, result }))
   }
-  private evaluate(expression: string): object {
+  private selected: string | undefined
+  private evaluate(expression: string, sessionId?: string): object {
     if (expression.startsWith('fetch(')) return { result: { value: this.auth } }
+    if (expression.includes('globalThis.huddleState')) {
+      this.popupPage()
+      return this.observationUndefined ? { result: { type: 'undefined' } } : { result: { value: null } }
+    }
     const leave = expression.includes(JSON.stringify(huddleSelectors.leave))
     if (leave && this.failLeave) {
-      this.page()
+      this.mainPage()
       return { result: { value: 'selector_missing' } }
     }
-    this.click(expression)
-    this.page()
-    return { result: { value: 'clicked' } }
+    const controls = ['headerStart', 'previewMicrophone', 'join', 'microphone', 'useBoth', 'leave'] as const
+    this.selected = controls.find((name) => expression.includes(JSON.stringify(huddleSelectors[name])))
+    if (this.selected === 'headerStart' && sessionId !== 'session') throw new Error('header click on popup')
+    if (this.selected !== 'headerStart' && this.selected !== 'leave' && !(this.inline && sessionId === 'session') &&
+      !(this.selected === 'useBoth' && this.prePopupConflict) && sessionId !== 'popup') {
+      throw new Error('popup click on main')
+    }
+    return { result: { value: { x: 120, y: 80 } } }
   }
-  private click(expression: string) {
-    const names = (selector: string) => expression.includes(JSON.stringify(selector))
-    if (names(huddleSelectors.previewMicrophone)) this.state.previewMuted = true
-    else if (names(huddleSelectors.join)) this.join()
-    else if (names(huddleSelectors.microphone)) this.state.muted = !this.state.muted
-    else if (names(huddleSelectors.useBoth)) {
-      this.state.useBoth = 0
-      this.state.switchDevice = 0
-    } else if (names(huddleSelectors.leave)) this.state.leave = 0
+  private click(sessionId?: string) {
+    if (this.selected === 'headerStart') {
+      if (this.suppressPopup) return
+      if (this.prePopupConflict) {
+        this.main.useBoth = 1
+        this.main.switchDevice = 1
+        this.mainPage()
+        return
+      }
+      if (this.inline) {
+        this.main = { ...this.state }
+        this.mainPage()
+        return
+      }
+      this.popupOpened = true
+      this.receive(JSON.stringify({
+        method: 'Target.targetCreated',
+        params: { targetInfo: { targetId: 'popup-target', openerId: 'target', type: 'page' } },
+      }))
+    } else if (this.selected === 'previewMicrophone') {
+      this.state.previewMuted = true
+      if (this.inline) this.main.previewMuted = true
+    }
+    else if (this.selected === 'join') this.join()
+    else if (this.selected === 'microphone') {
+      this.state.muted = !this.state.muted
+      if (this.inline) this.main.muted = this.state.muted
+    }
+    else if (this.selected === 'useBoth') {
+      if (this.prePopupConflict && sessionId === 'session') {
+        this.prePopupConflict = false
+        this.main.useBoth = 0
+        this.main.switchDevice = 0
+      } else {
+        this.state.useBoth = 0
+        this.state.switchDevice = 0
+      }
+    } else if (this.selected === 'leave' && sessionId === 'session') this.main.leave = 0
+    this.mainPage()
+    if (this.popupOpened) this.popupPage()
   }
   private join() {
-    this.state = { ...this.state, preview: 0, join: 0, leave: 1, dialogs: 0 }
+    this.state = { ...this.state, preview: 0, join: 0, dialogs: 0 }
+    if (this.inline) this.main = { ...this.state }
+    this.main.leave = 1
+    this.main.channelActive = 1
+    this.main.roomMembers = 1
+    if (!this.answer) {
+      this.state.peers = ['U2']
+      this.room.room.participants = ['U2']
+    }
     if (this.postJoinConflict) {
       this.state.useBoth = 1
       this.state.switchDevice = 1
     }
     this.event('Network.webSocketFrameReceived', {
       response: { opcode: 1, payloadData: JSON.stringify(this.room) },
-    })
+    }, this.inline ? 'session' : 'popup')
   }
-  event(method: string, params: object) {
-    this.receive(JSON.stringify({ method, params, sessionId: 'session' }))
+  event(method: string, params: object, sessionId = 'session') {
+    this.receive(JSON.stringify({ method, params, sessionId }))
+  }
+  mainPage() {
+    this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.main) })
+  }
+  popupPage() {
+    this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.state) }, 'popup')
   }
   page() {
-    this.event('Runtime.bindingCalled', { name: 'huddleState', payload: JSON.stringify(this.state) })
+    if (this.inline) this.mainPage()
+    else this.popupPage()
   }
   close() {
     this.closed = true

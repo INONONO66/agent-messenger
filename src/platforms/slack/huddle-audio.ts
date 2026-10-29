@@ -1,10 +1,11 @@
 import { z } from 'zod'
 
-import { huddleFailure, SlackHuddleError } from './huddle-contract'
+import { huddleFailure, JsonText, SlackHuddleError } from './huddle-contract'
 import { HuddleFrames, HuddleWriter, PCM_LIMIT, writePcm } from './huddle-pcm'
 import { HuddleProcesses } from './huddle-process'
 
 const ModuleId = z.string().regex(/^\d+$/)
+const SourceInfo = z.object({ default_source_name: z.string().min(1) })
 const Devices = z.array(z.object({ index: z.number().int(), name: z.string() }))
 const Streams = z.array(
   z.object({
@@ -14,6 +15,19 @@ const Streams = z.array(
   }),
 )
 const RATE = 192
+async function defaultSource(processes: HuddleProcesses): Promise<string> {
+  let source: string
+  try {
+    source = await processes.command('pactl', ['get-default-source'])
+  } catch (error) {
+    if (!(error instanceof SlackHuddleError) || error.detail !== 'audio_command_unsupported') throw error
+    const info = await processes.command('pactl', ['--format=json', 'info'])
+    const parsed = JsonText.pipe(SourceInfo).safeParse(info)
+    source = parsed.success ? parsed.data.default_source_name : ''
+  }
+  if (!source) throw new SlackHuddleError('voice_join_failed', 'audio_default_unknown')
+  return source
+}
 export const playbackClock = {
   now: () => performance.now(),
   sleep: (ms: number, signal: AbortSignal): Promise<void> =>
@@ -41,6 +55,7 @@ export async function createHuddleAudio(
   } = playbackClock,
 ) {
   const modules: string[] = []
+  let previousDefaultSource: string | undefined
   const devices = {
     transmit: `oni_huddle_tx_${key}`,
     receive: `oni_huddle_rx_${key}`,
@@ -74,6 +89,18 @@ export async function createHuddleAudio(
     playback?.input.end()
     processes.kill()
     closed = (async () => {
+      if (previousDefaultSource) {
+        try {
+          if (await defaultSource(processes) === devices.microphone) {
+            const previousAvailable = !previousDefaultSource.startsWith('oni_huddle_mic_') ||
+              Devices.parse(JSON.parse(await processes.command('pactl', ['--format=json', 'list', 'sources'])))
+                .some((source) => source.name === previousDefaultSource)
+            if (previousAvailable) await processes.command('pactl', ['set-default-source', previousDefaultSource])
+          }
+        } catch {
+          failure = new SlackHuddleError('voice_join_failed', 'audio_cleanup_failed')
+        }
+      }
       await Promise.all(
         [...modules].reverse().map(async (id) => {
           try {
@@ -105,6 +132,9 @@ export async function createHuddleAudio(
       if (!id.success) throw new SlackHuddleError('voice_join_failed', 'audio_module_invalid')
       modules.push(id.data)
     }
+    const source = await defaultSource(processes)
+    await processes.command('pactl', ['set-default-source', devices.microphone])
+    previousDefaultSource = source
     const raw = ['--raw', '--format=s16le', '--rate=48000', '--channels=2']
     const latency = ['--latency-msec=20', '--process-time-msec=10']
     const activePlayback = processes.open('pacat', ['--playback', ...raw, `--device=${devices.transmit}`, ...latency])
@@ -159,28 +189,43 @@ export async function createHuddleAudio(
       write: (pcm: Uint8Array) => output.write(pcm),
       startCapture,
       close,
-      async verifyRoutes(): Promise<void> {
-        const [sinks, sources, inputs, outputs] = await Promise.all([
-          processes.command('pactl', ['--format=json', 'list', 'sinks']),
-          processes.command('pactl', ['--format=json', 'list', 'sources']),
-          processes.command('pactl', ['--format=json', 'list', 'sink-inputs']),
-          processes.command('pactl', ['--format=json', 'list', 'source-outputs']),
-        ])
-        const receive = Devices.parse(JSON.parse(sinks)).find((device) => device.name === devices.receive)
-        const microphone = Devices.parse(JSON.parse(sources)).find((device) => device.name === devices.microphone)
-        const belongs = (stream: z.infer<typeof Streams>[number]) =>
-          stream.properties['application.name'] === `huddle_${key}`
-        const render = Streams.parse(JSON.parse(inputs)).filter(belongs)
-        const record = Streams.parse(JSON.parse(outputs)).filter(belongs)
-        if (
-          !receive ||
-          !microphone ||
-          !render.length ||
-          !record.length ||
-          render.some((stream) => stream.sink !== receive.index) ||
-          record.some((stream) => stream.source !== microphone.index)
-        ) {
+      async verifyRoutes(capture = true): Promise<void> {
+        const routes = async () => {
+          const [sinks, sources, inputs, outputs] = await Promise.all([
+            processes.command('pactl', ['--format=json', 'list', 'sinks']),
+            processes.command('pactl', ['--format=json', 'list', 'sources']),
+            processes.command('pactl', ['--format=json', 'list', 'sink-inputs']),
+            processes.command('pactl', ['--format=json', 'list', 'source-outputs']),
+          ])
+          const receive = Devices.parse(JSON.parse(sinks)).find((device) => device.name === devices.receive)
+          const microphone = Devices.parse(JSON.parse(sources)).find((device) => device.name === devices.microphone)
+          const belongs = (stream: z.infer<typeof Streams>[number]) =>
+            stream.properties['application.name'] === `huddle_${key}`
+          const render = Streams.parse(JSON.parse(inputs)).filter(belongs)
+          const record = Streams.parse(JSON.parse(outputs)).filter(belongs)
+          if (
+            !receive ||
+            !microphone ||
+            !render.length ||
+            render.some((stream) => stream.sink !== receive.index) ||
+            (capture && record.some((stream) => stream.source !== microphone.index))
+          ) {
+            throw new SlackHuddleError('voice_join_failed', 'audio_device_mismatch')
+          }
+          return !capture || record.length > 0
+        }
+        if (await routes()) return
+        const subscription = processes.open('pactl', ['subscribe'])
+        const cancel = processes.clock.after(10_000, () => subscription.kill())
+        try {
+          if (await routes()) return
+          for await (const event of subscription.output) {
+            if (event.toString().includes('source-output') && await routes()) return
+          }
           throw new SlackHuddleError('voice_join_failed', 'audio_device_mismatch')
+        } finally {
+          cancel()
+          subscription.kill()
         }
       },
     }
