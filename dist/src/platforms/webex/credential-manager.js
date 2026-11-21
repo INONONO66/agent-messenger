@@ -1,0 +1,201 @@
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { getConfigDir } from '../../shared/utils/config-dir.js';
+import { getWebexAppCredentials } from './app-config.js';
+import { WebexConfigSchema } from './types.js';
+const OAUTH_DEVICE_AUTHORIZE_URL = 'https://webexapis.com/v1/device/authorize';
+const OAUTH_DEVICE_TOKEN_URL = 'https://webexapis.com/v1/device/token';
+const OAUTH_TOKEN_URL = 'https://webexapis.com/v1/access_token';
+const OAUTH_SCOPES = 'spark:all';
+export { OAUTH_SCOPES };
+export class WebexCredentialManager {
+    configDir;
+    credentialsPath;
+    constructor(configDir) {
+        this.configDir = configDir ?? getConfigDir();
+        this.credentialsPath = join(this.configDir, 'webex-credentials.json');
+    }
+    async loadConfig() {
+        if (!existsSync(this.credentialsPath))
+            return null;
+        const content = await readFile(this.credentialsPath, 'utf-8');
+        const result = WebexConfigSchema.safeParse(JSON.parse(content));
+        if (!result.success)
+            return null;
+        return result.data;
+    }
+    async saveConfig(config) {
+        await mkdir(this.configDir, { recursive: true });
+        const tmpPath = `${this.credentialsPath}.tmp`;
+        await writeFile(tmpPath, JSON.stringify(config, null, 2), {
+            encoding: 'utf-8',
+            mode: 0o600,
+        });
+        await rename(tmpPath, this.credentialsPath);
+    }
+    async getToken(clientId, clientSecret) {
+        const config = await this.loadConfig();
+        if (!config)
+            return null;
+        if (config.tokenType === 'manual') {
+            return config.accessToken;
+        }
+        const isExpired = config.expiresAt > 0 && config.expiresAt < Date.now() + 5 * 60 * 1000;
+        if (config.tokenType === 'extracted' || config.tokenType === 'password') {
+            if (isExpired && config.refreshToken) {
+                const builtinCreds = config.tokenType === 'password' ? null : getWebexAppCredentials();
+                const resolvedClientId = config.clientId ?? builtinCreds?.clientId;
+                const resolvedClientSecret = config.clientSecret ?? builtinCreds?.clientSecret;
+                if (!resolvedClientId || !resolvedClientSecret)
+                    return null;
+                const refreshed = await this.refreshToken(config.refreshToken, resolvedClientId, resolvedClientSecret);
+                if (refreshed) {
+                    await this.saveConfig({ ...config, ...refreshed, tokenType: config.tokenType });
+                    return refreshed.accessToken;
+                }
+            }
+            return config.accessToken;
+        }
+        if (isExpired) {
+            const builtinCreds = getWebexAppCredentials();
+            const resolvedClientId = clientId ?? config.clientId ?? builtinCreds.clientId;
+            const resolvedClientSecret = clientSecret ?? config.clientSecret ?? builtinCreds.clientSecret;
+            const refreshed = await this.refreshToken(config.refreshToken, resolvedClientId, resolvedClientSecret);
+            if (refreshed) {
+                await this.saveConfig({ ...config, ...refreshed });
+                return refreshed.accessToken;
+            }
+            return null;
+        }
+        return config.accessToken;
+    }
+    async refreshToken(refreshToken, clientId, clientSecret) {
+        try {
+            const response = await fetch(OAUTH_TOKEN_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    grant_type: 'refresh_token',
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                    refresh_token: refreshToken,
+                }),
+            });
+            if (!response.ok)
+                return null;
+            const data = (await response.json());
+            return {
+                accessToken: data.access_token,
+                refreshToken: data.refresh_token,
+                expiresAt: Date.now() + data.expires_in * 1000,
+            };
+        }
+        catch {
+            return null;
+        }
+    }
+    async requestDeviceCode(clientId, scopes) {
+        const response = await fetch(OAUTH_DEVICE_AUTHORIZE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: clientId,
+                scope: scopes ?? OAUTH_SCOPES,
+            }),
+        });
+        if (!response.ok) {
+            const errorBody = await response.text();
+            throw new Error(`Device authorization failed: ${response.status} ${errorBody}`);
+        }
+        const data = (await response.json());
+        return {
+            deviceCode: data.device_code,
+            userCode: data.user_code,
+            verificationUri: data.verification_uri,
+            verificationUriComplete: data.verification_uri_complete,
+            expiresIn: data.expires_in,
+            interval: data.interval,
+        };
+    }
+    async pollDeviceToken(deviceCode, interval, expiresIn, clientId, clientSecret) {
+        const basicAuth = btoa(`${clientId}:${clientSecret ?? ''}`);
+        const deadline = Date.now() + expiresIn * 1000;
+        while (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+            const response = await fetch(OAUTH_DEVICE_TOKEN_URL, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Basic ${basicAuth}`,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: new URLSearchParams({
+                    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+                    device_code: deviceCode,
+                    client_id: clientId,
+                }),
+            });
+            if (response.ok) {
+                const data = (await response.json());
+                const config = {
+                    accessToken: data.access_token,
+                    refreshToken: data.refresh_token,
+                    expiresAt: Date.now() + data.expires_in * 1000,
+                };
+                return config;
+            }
+            if (response.status === 428)
+                continue;
+            const errorBody = (await response.json().catch(() => null));
+            const errorDesc = errorBody?.errors?.[0]?.description ?? '';
+            if (errorDesc.includes('authorization_pending') || errorDesc.includes('slow_down')) {
+                continue;
+            }
+            throw new Error(`Device token exchange failed: ${response.status} ${errorDesc}`);
+        }
+        throw new Error('Device authorization timed out');
+    }
+    async exchangeDeviceCode(deviceCode, clientId, clientSecret) {
+        const basicAuth = btoa(`${clientId}:${clientSecret ?? ''}`);
+        const response = await fetch(OAUTH_DEVICE_TOKEN_URL, {
+            method: 'POST',
+            headers: {
+                Authorization: `Basic ${basicAuth}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+                grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+                device_code: deviceCode,
+                client_id: clientId,
+            }),
+        });
+        if (response.ok) {
+            const data = (await response.json());
+            return {
+                status: 'success',
+                config: {
+                    accessToken: data.access_token,
+                    refreshToken: data.refresh_token,
+                    expiresAt: Date.now() + data.expires_in * 1000,
+                },
+            };
+        }
+        if (response.status === 428)
+            return { status: 'pending' };
+        const errorBody = (await response.json().catch(() => null));
+        const errorDesc = errorBody?.errors?.[0]?.description ?? '';
+        if (errorDesc.includes('authorization_pending') || errorDesc.includes('slow_down')) {
+            return { status: 'pending' };
+        }
+        if (errorDesc.includes('expired_token') || errorDesc.includes('expired')) {
+            return { status: 'expired' };
+        }
+        return { status: 'error', message: errorDesc || `http_${response.status}` };
+    }
+    async clearCredentials() {
+        if (existsSync(this.credentialsPath)) {
+            await rm(this.credentialsPath);
+        }
+    }
+}
+//# sourceMappingURL=credential-manager.js.map

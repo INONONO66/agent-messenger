@@ -1,0 +1,209 @@
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { Command } from 'commander';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { SlackClient } from '../client.js';
+import { CredentialManager } from '../credential-manager.js';
+function toFileOutput(file) {
+    return {
+        id: file.id,
+        name: file.name,
+        title: file.title,
+        mimetype: file.mimetype,
+        size: file.size,
+        url_private: file.url_private,
+        created: file.created,
+        user: file.user,
+        channels: file.channels,
+    };
+}
+async function uploadAction(channel, paths, options) {
+    try {
+        if (options.filename && paths.length > 1) {
+            console.log(formatOutput({ error: '--filename can only be used with a single file' }, options.pretty));
+            process.exit(1);
+            return;
+        }
+        const credManager = new CredentialManager();
+        const workspace = await credManager.getWorkspace();
+        if (!workspace) {
+            console.log(formatOutput({ error: 'No current workspace set. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new SlackClient().login({ token: workspace.token, cookie: workspace.cookie });
+        channel = await client.resolveChannel(channel);
+        if (paths.length === 1) {
+            const filePath = resolve(paths[0]);
+            const fileBuffer = readFileSync(filePath);
+            const filename = options.filename || basename(filePath) || 'file';
+            const file = await client.uploadFile([channel], fileBuffer, filename, {
+                thread_ts: options.thread,
+                title: options.title,
+                initial_comment: options.comment,
+            });
+            console.log(formatOutput(toFileOutput(file), options.pretty));
+            return;
+        }
+        const uploads = paths.map((path) => {
+            const filePath = resolve(path);
+            return {
+                file: readFileSync(filePath),
+                filename: basename(filePath) || 'file',
+            };
+        });
+        const files = await client.uploadFiles(uploads, {
+            channel,
+            threadTs: options.thread,
+            comment: options.comment,
+            title: options.title,
+        });
+        console.log(formatOutput(files.map(toFileOutput), options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function listAction(options) {
+    try {
+        const credManager = new CredentialManager();
+        const workspace = await credManager.getWorkspace();
+        if (!workspace) {
+            console.log(formatOutput({ error: 'No current workspace set. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new SlackClient().login({ token: workspace.token, cookie: workspace.cookie });
+        const channel = options.channel ? await client.resolveChannel(options.channel) : undefined;
+        const files = await client.listFiles(channel);
+        const output = files.map((file) => ({
+            id: file.id,
+            name: file.name,
+            title: file.title,
+            mimetype: file.mimetype,
+            size: file.size,
+            url_private: file.url_private,
+            created: file.created,
+            user: file.user,
+            channels: file.channels,
+        }));
+        console.log(formatOutput(output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function infoAction(fileId, options) {
+    try {
+        const credManager = new CredentialManager();
+        const workspace = await credManager.getWorkspace();
+        if (!workspace) {
+            console.log(formatOutput({ error: 'No current workspace set. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new SlackClient().login({ token: workspace.token, cookie: workspace.cookie });
+        const fileData = await client.getFileInfo(fileId);
+        const output = {
+            id: fileData.id,
+            name: fileData.name,
+            title: fileData.title,
+            mimetype: fileData.mimetype,
+            size: fileData.size,
+            url_private: fileData.url_private,
+            created: fileData.created,
+            user: fileData.user,
+            channels: fileData.channels,
+        };
+        console.log(formatOutput(output, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function downloadAction(fileId, outputPath, options) {
+    try {
+        const credManager = new CredentialManager();
+        const workspace = await credManager.getWorkspace();
+        if (!workspace) {
+            console.log(formatOutput({ error: 'No current workspace set. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new SlackClient().login({ token: workspace.token, cookie: workspace.cookie });
+        const { buffer, file } = await client.downloadFile(fileId);
+        const safeName = basename(file.name.replace(/\\/g, '/'));
+        let destPath = outputPath ? resolve(outputPath) : resolve(safeName);
+        let isDirectory = false;
+        try {
+            isDirectory = statSync(destPath).isDirectory();
+        }
+        catch (error) {
+            const err = error;
+            if (err.code !== 'ENOENT') {
+                throw error;
+            }
+        }
+        if (isDirectory) {
+            destPath = join(destPath, safeName);
+        }
+        writeFileSync(destPath, buffer);
+        console.log(formatOutput({
+            id: file.id,
+            name: file.name,
+            mimetype: file.mimetype,
+            size: file.size,
+            path: destPath,
+        }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+async function deleteFileAction(fileId, options) {
+    try {
+        const credManager = new CredentialManager();
+        const workspace = await credManager.getWorkspace();
+        if (!workspace) {
+            console.log(formatOutput({ error: 'No current workspace set. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new SlackClient().login({ token: workspace.token, cookie: workspace.cookie });
+        await client.deleteFile(fileId);
+        console.log(formatOutput({ success: true, file_id: fileId }, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export const fileCommand = new Command('file')
+    .description('File commands')
+    .addCommand(new Command('upload')
+    .description('Upload files to channel (several files are grouped into one message)')
+    .argument('<channel>', 'channel ID or name')
+    .argument('<paths...>', 'file paths')
+    .option('--filename <name>', 'override filename (single file only)')
+    .option('--thread <ts>', 'post the files as a reply in this thread')
+    .option('--comment <text>', 'message text attached to the files')
+    .option('--title <title>', 'title applied to every file')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(uploadAction))
+    .addCommand(new Command('list')
+    .description('List files in workspace')
+    .option('--channel <id>', 'filter by channel')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(listAction))
+    .addCommand(new Command('info')
+    .description('Show file details')
+    .argument('<file>', 'file ID')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(infoAction))
+    .addCommand(new Command('download')
+    .description('Download file')
+    .argument('<file>', 'file ID')
+    .argument('[output-path]', 'output file path')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(downloadAction))
+    .addCommand(new Command('delete')
+    .description('Delete a file')
+    .argument('<file>', 'file ID')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(deleteFileAction));
+//# sourceMappingURL=file.js.map

@@ -1,0 +1,91 @@
+import { Command } from 'commander';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { DiscordBotCredentialManager } from '../credential-manager.js';
+import { getClient } from './shared.js';
+export async function snapshotAction(options) {
+    try {
+        const serverId = options.server || (await (options._credManager ?? new DiscordBotCredentialManager()).getCurrentServer());
+        if (!serverId) {
+            return { error: 'No server set. Run "server switch <server-id>" first.' };
+        }
+        const client = await getClient(options);
+        const isFull = options.full || options.channelsOnly || options.usersOnly;
+        if (isFull) {
+            const limit = options.limit ?? 5;
+            if (options.usersOnly) {
+                const users = await client.listUsers(serverId);
+                return {
+                    server_id: serverId,
+                    users: users.map((u) => ({
+                        id: u.id,
+                        username: u.username,
+                        global_name: u.global_name ?? null,
+                    })),
+                };
+            }
+            const allChannels = await client.listChannels(serverId);
+            const textChannels = allChannels.filter((ch) => ch.type === 0);
+            if (options.channelsOnly) {
+                return {
+                    server_id: serverId,
+                    channels: textChannels.map((ch) => ({
+                        id: ch.id,
+                        name: ch.name,
+                        type: ch.type,
+                    })),
+                };
+            }
+            const channelsWithMessages = await Promise.all(textChannels.map(async (ch) => {
+                const messages = await client.getMessages(ch.id, limit);
+                return {
+                    id: ch.id,
+                    name: ch.name,
+                    messages: messages.map((msg) => ({
+                        id: msg.id,
+                        author: msg.author.username,
+                        content: msg.content,
+                        timestamp: msg.timestamp,
+                    })),
+                };
+            }));
+            return {
+                server_id: serverId,
+                channels: channelsWithMessages,
+            };
+        }
+        const allChannels = await client.listChannels(serverId);
+        const textChannels = allChannels.filter((ch) => ch.type === 0);
+        return {
+            server_id: serverId,
+            channels: textChannels.map((ch) => ({ id: ch.id, name: ch.name })),
+            hint: "Use 'message list <channel>' for messages, 'channel info <channel>' for channel details, 'user list' for members.",
+        };
+    }
+    catch (error) {
+        return { error: error.message };
+    }
+}
+export const snapshotCommand = new Command('snapshot')
+    .description('Server overview for AI agents (brief by default, use --full for comprehensive data)')
+    .option('--full', 'Include messages and members (verbose)')
+    .option('--channels-only', 'List channels only, skip messages')
+    .option('--users-only', 'List users only')
+    .option('--limit <n>', 'Messages per channel with --full (default: 5)', '5')
+    .option('--server <id>', 'Use specific server')
+    .option('--bot <id>', 'Use specific bot')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(async (options) => {
+    try {
+        const result = await snapshotAction({
+            ...options,
+            full: options.full,
+            limit: parseInt(options.limit, 10),
+        });
+        console.log(formatOutput(result, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+});
+//# sourceMappingURL=snapshot.js.map

@@ -1,0 +1,93 @@
+const SELF_KEY_PREFIX = 'e2eeKeys:';
+function selfKey(id) {
+    return `${SELF_KEY_PREFIX}${id}`;
+}
+function isE2EEKeyData(value) {
+    if (!value || typeof value !== 'object')
+        return false;
+    const data = value;
+    return typeof data.privKey === 'string' && typeof data.pubKey === 'string';
+}
+function parseKeyData(raw) {
+    if (typeof raw !== 'string')
+        return isE2EEKeyData(raw) ? raw : null;
+    try {
+        const parsed = JSON.parse(raw);
+        return isE2EEKeyData(parsed) ? parsed : null;
+    }
+    catch {
+        return null;
+    }
+}
+// The stored payload carries its own keyId. Requiring it to equal the slot it was
+// read from rejects entries mislabeled under an advertised keyId, so only a payload
+// genuinely belonging to that keyId is ever trusted.
+function keyDataMatchesSlot(data, keyId) {
+    return String(data.keyId) === String(keyId);
+}
+function keyIdOf(key) {
+    if (Array.isArray(key)) {
+        const id = key[2];
+        return typeof id === 'number' || typeof id === 'string' ? id : undefined;
+    }
+    const id = key.keyId;
+    return typeof id === 'number' || typeof id === 'string' ? id : undefined;
+}
+function advertisedKeyIds(keys) {
+    if (!keys)
+        return [];
+    const ids = [];
+    for (const key of keys) {
+        const id = keyIdOf(key);
+        if (id !== undefined)
+            ids.push(id);
+    }
+    return ids;
+}
+// Ensures the account's own self-key is addressable by MID for getE2EESelfKeyData,
+// which checks `e2eeKeys:<mid>` before falling back to a live Thrift channel. The
+// keyId-addressed entry is only trusted when the server advertises that exact keyId
+// for this account, so a contaminated store (another account's key copied in) can
+// never promote a foreign private key to this MID. Returns true when a self-key
+// becomes available under the MID.
+export async function ensureSelfKeyForMid(storage, mid, advertisedKeys) {
+    if (!mid)
+        return false;
+    const existing = parseKeyData(await storage.get(selfKey(mid)));
+    if (existing)
+        return true;
+    for (const keyId of advertisedKeyIds(advertisedKeys)) {
+        const candidate = parseKeyData(await storage.get(selfKey(keyId)));
+        if (candidate && keyDataMatchesSlot(candidate, keyId)) {
+            await storage.set(selfKey(mid), JSON.stringify(candidate));
+            return true;
+        }
+    }
+    return false;
+}
+// Copies only this account's E2EE key material out of a shared (default) store into
+// an isolated per-account store. Trust is anchored to the server-advertised keyIds
+// for `mid`, so foreign-account keys present in the shared store are never carried
+// over. Used right after a fresh login resolves the account MID.
+export async function migrateOwnE2EEKeys(source, target, mid, advertisedKeys) {
+    if (!mid)
+        return 0;
+    let migrated = 0;
+    const own = parseKeyData(await source.get(selfKey(mid)));
+    if (own) {
+        await target.set(selfKey(mid), JSON.stringify(own));
+        migrated++;
+    }
+    for (const keyId of advertisedKeyIds(advertisedKeys)) {
+        const data = parseKeyData(await source.get(selfKey(keyId)));
+        if (!data || !keyDataMatchesSlot(data, keyId))
+            continue;
+        await target.set(selfKey(keyId), JSON.stringify(data));
+        migrated++;
+        const publicKey = await source.get(`e2eePublicKeys:${keyId}`);
+        if (typeof publicKey === 'string')
+            await target.set(`e2eePublicKeys:${keyId}`, publicKey);
+    }
+    return migrated;
+}
+//# sourceMappingURL=e2ee-storage.js.map

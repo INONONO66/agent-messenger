@@ -1,0 +1,103 @@
+import { Command } from 'commander';
+import { parallelMap } from '../../../shared/utils/concurrency.js';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { TeamsClient } from '../client.js';
+import { TeamsCredentialManager } from '../credential-manager.js';
+export async function snapshotAction(options) {
+    try {
+        const credManager = new TeamsCredentialManager();
+        const cred = await credManager.getTokenWithExpiry();
+        if (!cred) {
+            console.log(formatOutput({ error: 'Not authenticated. Run "auth extract" first.' }, options.pretty));
+            process.exit(1);
+        }
+        const currentTeam = await credManager.getCurrentTeam();
+        const teamId = options.teamId || currentTeam?.team_id;
+        if (!teamId) {
+            console.log(formatOutput({ error: 'No current team set. Run "team switch" first or use --team-id.' }, options.pretty));
+            process.exit(1);
+        }
+        const client = await new TeamsClient().login({
+            token: cred.token,
+            tokenExpiresAt: cred.tokenExpiresAt,
+            accountType: cred.accountType,
+            region: cred.region,
+        });
+        const snapshot = {};
+        const team = await client.getTeam(teamId);
+        snapshot.team = {
+            id: team.id,
+            name: team.name,
+            description: team.description,
+        };
+        const isFull = options.full || options.channelsOnly || options.usersOnly;
+        if (isFull) {
+            const messageLimit = options.limit || 20;
+            if (!options.usersOnly) {
+                const channels = await client.listChannels(teamId);
+                snapshot.channels = channels.map((ch) => ({
+                    id: ch.id,
+                    name: ch.name,
+                    type: ch.type,
+                }));
+                if (!options.channelsOnly) {
+                    const channelMessages = await parallelMap(channels, async (channel) => {
+                        const messages = await client.getMessages(teamId, channel.id, messageLimit);
+                        return messages.map((msg) => ({
+                            ...msg,
+                            channel_name: channel.name,
+                        }));
+                    }, 5);
+                    snapshot.recent_messages = channelMessages.flat().map((msg) => ({
+                        channel_id: msg.channel_id,
+                        channel_name: msg.channel_name,
+                        id: msg.id,
+                        author: msg.author.displayName,
+                        content: msg.content,
+                        timestamp: msg.timestamp,
+                    }));
+                }
+            }
+            if (!options.channelsOnly) {
+                const users = await client.listUsers(teamId);
+                snapshot.members = users.map((u) => ({
+                    id: u.id,
+                    displayName: u.displayName,
+                    email: u.email || null,
+                }));
+            }
+        }
+        else {
+            if (!options.usersOnly) {
+                const channels = await client.listChannels(teamId);
+                snapshot.channels = channels.map((ch) => ({ id: ch.id, name: ch.name }));
+            }
+            snapshot.hint =
+                "Use 'message list <channel>' for messages, 'channel info <channel>' for channel details, 'user list' for members.";
+        }
+        console.log(formatOutput(snapshot, options.pretty));
+    }
+    catch (error) {
+        handleError(error);
+    }
+}
+export const snapshotCommand = new Command('snapshot')
+    .description('Get team overview for AI agents (brief by default, use --full for comprehensive data)')
+    .option('--full', 'Include messages and members (verbose)')
+    .option('--channels-only', 'Include only channels (exclude messages and members)')
+    .option('--users-only', 'Include only members (exclude channels and messages)')
+    .option('--limit <n>', 'Number of recent messages per channel with --full (default: 20)', '20')
+    .option('--team-id <id>', 'Team ID (defaults to current team)')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(async (options) => {
+    await snapshotAction({
+        channelsOnly: options.channelsOnly,
+        usersOnly: options.usersOnly,
+        full: options.full,
+        limit: parseInt(options.limit, 10),
+        teamId: options.teamId,
+        pretty: options.pretty,
+    });
+});
+//# sourceMappingURL=snapshot.js.map

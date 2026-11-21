@@ -1,0 +1,61 @@
+import { DerivedKeyCache } from '../../shared/utils/derived-key-cache.js';
+export interface ExtractedWorkspace {
+    workspace_id: string;
+    workspace_name: string;
+    token: string;
+    cookie: string;
+}
+export declare class TokenExtractor {
+    private platform;
+    private slackDir;
+    private keyCache;
+    private debugLog;
+    private browserDecryptor;
+    private browserCookieReader;
+    private customBrowserProfileDirs;
+    constructor(platform?: NodeJS.Platform, slackDir?: string, keyCache?: DerivedKeyCache, debugLog?: (message: string) => void, customBrowserProfileDirs?: string[]);
+    private debug;
+    getSlackDir(): string;
+    private findMsixSlackDir;
+    extractCookie(): Promise<string>;
+    extract(): Promise<ExtractedWorkspace[]>;
+    private mergeBrowserResults;
+    private addExtractedWorkspaces;
+    extractFromBrowsers(): Promise<ExtractedWorkspace[]>;
+    private extractCookieFromBrowserProfile;
+    private extractCookieFromBrowserSQLite;
+    private extractTokensFromLevelDB;
+    private deduplicateTokens;
+    private findLevelDBDirs;
+    private isLevelDBDir;
+    private extractFromLevelDB;
+    private extractViaClassicLevelCopy;
+    private extractViaClassicLevel;
+    private extractTokensFromBlobFiles;
+    private findFilesRecursive;
+    private extractTokensFromLDBFiles;
+    private extractTokenFromLogFile;
+    private extractTokenFromBuffer;
+    private parseTokenValue;
+    private parseTeamsObject;
+    private parseSingleToken;
+    private extractCookieFromSQLite;
+    private readCookieFromDB;
+    tryDecryptCookie(encrypted: Buffer): string | null;
+    private decryptV10Cookie;
+    private decryptLinuxCookieWithKey;
+    private decryptV10CookieLinux;
+    private getLinuxKeyringPassword;
+    private decryptV11CookieLinux;
+    decryptV10CookieWindows(encrypted: Buffer): string | null;
+    getWindowsMasterKey(): Buffer | null;
+    decryptDPAPI(encrypted: Buffer): Buffer | null;
+    private cachedKey;
+    private usedCachedKey;
+    private getDerivedKeyAsync;
+    private getDerivedKey;
+    private getDerivedKeyFromKeychain;
+    clearKeyCache(): Promise<void>;
+    getWorkspaceDomains(): Record<string, string>;
+}
+//# sourceMappingURL=token-extractor.d.ts.map
