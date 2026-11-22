@@ -676,12 +676,13 @@ class AccountClient implements TelegramAccountClient {
     }
   }
 
-  private async markdownText(text: string): Promise<z.infer<typeof Caption>> {
-    const parse_mode = { '@type': 'textParseModeMarkdown', version: 2 }
+  private async formattedText(text: string, mode: 'html' | 'markdownv2'): Promise<z.infer<typeof Caption>> {
+    const parse_mode =
+      mode === 'html' ? { '@type': 'textParseModeHTML' } : { '@type': 'textParseModeMarkdown', version: 2 }
     const parsed = Caption.safeParse(
-      await this.call({ '@type': 'parseTextEntities', text, parse_mode }, 'invalid_markdown'),
+      await this.call({ '@type': 'parseTextEntities', text, parse_mode }, 'invalid_formatting'),
     )
-    if (!parsed.success) throw new TelegramAccountError('TDLib returned no formatted text', 'invalid_markdown')
+    if (!parsed.success) throw new TelegramAccountError('TDLib returned no formatted text', 'invalid_formatting')
     return parsed.data
   }
 
@@ -693,7 +694,10 @@ class AccountClient implements TelegramAccountClient {
   ): Promise<{ readonly messageId: string; readonly botMessageId?: string }> {
     if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'not_sent')
     const reply_to = content.replyTo ? { '@type': 'inputMessageReplyToMessage', message_id: content.replyTo } : null
-    const formatted = content.kind === 'text' && content.markdown ? await this.markdownText(content.text) : undefined
+    const formatted =
+      content.kind === 'text' && content.parseMode
+        ? await this.formattedText(content.text, content.parseMode)
+        : undefined
     const input_message_content = inputContent(content, stagedPath, formatted)
     let reply: TdEvent
     try {

@@ -38,8 +38,8 @@ export type TelegramSendContent =
       readonly text: string
       readonly replyTo?: string
       readonly threadId?: string
-      /** The text is Telegram MarkdownV2; TDLib turns it into formatting, and text it cannot parse is invalid_markdown. */
-      readonly markdown?: boolean
+      /** The text is Telegram HTML or MarkdownV2; TDLib turns it into formatting, and text it cannot parse is invalid_formatting. */
+      readonly parseMode?: 'html' | 'markdownv2'
     }
   | {
       readonly kind: 'image' | 'audio' | 'voice' | 'video' | 'file'
@@ -107,7 +107,7 @@ export type TelegramAccountErrorCode =
   | 'download_failed'
   | 'history_unavailable'
   | 'not_sent'
-  | 'invalid_markdown'
+  | 'invalid_formatting'
   | 'unknown'
 
 export class TelegramAccountError extends Error {

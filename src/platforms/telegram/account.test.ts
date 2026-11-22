@@ -882,7 +882,7 @@ describe('history, sends and downloads', () => {
     expect(await readdir(input.filesDir)).toEqual([])
   })
 
-  it('sends markdown as TDLib-parsed formatting and refuses markdown TDLib cannot parse', async () => {
+  it('sends HTML or MarkdownV2 as TDLib-parsed formatting and refuses markup TDLib cannot parse', async () => {
     const { client, fake } = await started()
     const entities = [{ '@type': 'textEntity', offset: 0, length: 4, type: { '@type': 'textEntityTypeBold' } }]
     const texts: unknown[] = []
@@ -903,22 +903,21 @@ describe('history, sends and downloads', () => {
       })
       fake.reply(id, request, { '@type': 'message', id: temp })
     }
-    await client.send('33', { kind: 'text', text: '*bold*', markdown: true })
-    const refused = await client.send('33', { kind: 'text', text: 'bad*', markdown: true }).catch((error) => error)
+    await client.send('33', { kind: 'text', text: '<b>bold</b>', parseMode: 'html' })
+    const refused = await client
+      .send('33', { kind: 'text', text: 'bad*', parseMode: 'markdownv2' })
+      .catch((error) => error)
     await client.send('33', { kind: 'text', text: 'plain *as is*' })
     expect(texts).toEqual([
       { '@type': 'formattedText', text: 'bold', entities },
       { '@type': 'formattedText', text: 'plain *as is*', entities: [] },
     ])
-    expect((refused as { code?: string }).code).toBe('invalid_markdown')
+    expect((refused as { code?: string }).code).toBe('invalid_formatting')
     expect(
       fake.sent
         .filter(({ request }) => request['@type'] === 'parseTextEntities')
         .map(({ request }) => request.parse_mode),
-    ).toEqual([
-      { '@type': 'textParseModeMarkdown', version: 2 },
-      { '@type': 'textParseModeMarkdown', version: 2 },
-    ])
+    ).toEqual([{ '@type': 'textParseModeHTML' }, { '@type': 'textParseModeMarkdown', version: 2 }])
   })
 
   it('stages each media byte kind privately and removes staging after confirmation', async () => {
