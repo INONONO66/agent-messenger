@@ -21,6 +21,21 @@ import { TelegramError } from './types'
 
 const Id = z.union([z.number(), z.string()])
 const Authorization = z.object({ '@type': z.string() })
+const UserFields = z.object({
+  type: Authorization,
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+})
+
+interface KnownUser {
+  readonly isBot: boolean
+  readonly name?: string
+}
+
+function knownUser(user: z.infer<typeof UserFields>): KnownUser {
+  const name = [user.first_name, user.last_name].filter((part) => part !== undefined && part !== '').join(' ')
+  return { isBot: user.type['@type'] === 'userTypeBot', ...(name === '' ? {} : { name }) }
+}
 const File = z.object({
   id: z.number(),
   size: z.number(),
@@ -137,7 +152,7 @@ class AccountClient implements TelegramAccountClient {
   private readonly media = new Map<number, TelegramAccountMessage['media'][number]>()
   private readonly handlers = new Set<(message: TelegramAccountMessage) => void>()
   private readonly stateHandlers = new Set<(state: TelegramAccountState) => void>()
-  private readonly users = new Map<string, boolean>()
+  private readonly users = new Map<string, KnownUser>()
   private filesDir?: string
   private ready = false
   private lastState?: string
@@ -223,9 +238,9 @@ class AccountClient implements TelegramAccountClient {
   }
 
   private onUser(event: TdEvent): void {
-    const user = z.object({ id: Id, type: Authorization }).safeParse(event.user)
+    const user = UserFields.extend({ id: Id }).safeParse(event.user)
     if (user.success && user.data.type['@type'] !== 'userTypeUnknown')
-      this.users.set(String(user.data.id), user.data.type['@type'] === 'userTypeBot')
+      this.users.set(String(user.data.id), knownUser(user.data))
   }
 
   private onChat(event: TdEvent): void {
@@ -278,19 +293,17 @@ class AccountClient implements TelegramAccountClient {
     this.emitState({ state: 'closed', reason })
   }
 
-  private async senderBot(id: z.infer<typeof Id> | undefined): Promise<boolean | undefined> {
+  private async senderUser(id: z.infer<typeof Id> | undefined): Promise<KnownUser | undefined> {
     if (id === undefined) return undefined
     const cached = this.users.get(String(id))
     if (cached !== undefined) return cached
-    const user = z
-      .object({ type: Authorization })
-      .safeParse(await this.call({ '@type': 'getUser', user_id: id }, 'session_lost'))
+    const user = UserFields.safeParse(await this.call({ '@type': 'getUser', user_id: id }, 'session_lost'))
     if (!user.success) throw new TelegramAccountError('Sender user type unavailable', 'session_lost')
-    const kind = user.data.type['@type']
-    if (kind === 'userTypeUnknown') throw new TelegramAccountError('Sender user type unavailable', 'session_lost')
-    const isBot = kind === 'userTypeBot'
-    this.users.set(String(id), isBot)
-    return isBot
+    if (user.data.type['@type'] === 'userTypeUnknown')
+      throw new TelegramAccountError('Sender user type unavailable', 'session_lost')
+    const known = knownUser(user.data)
+    this.users.set(String(id), known)
+    return known
   }
 
   private async publishMessage(raw: z.infer<typeof AccountMessageSchema>, chatId: string): Promise<void> {
@@ -307,8 +320,8 @@ class AccountClient implements TelegramAccountClient {
     chatType: string | undefined,
   ): Promise<TelegramAccountMessage | undefined> {
     const mentions = await this.resolveMentions(raw)
-    const userIsBot = await this.senderBot(SenderUser.safeParse(raw).data?.sender_id.user_id)
-    return parseAccountMessage(raw, chatType, mentions, userIsBot)
+    const user = await this.senderUser(SenderUser.safeParse(raw).data?.sender_id.user_id)
+    return parseAccountMessage(raw, chatType, mentions, user?.isBot, user?.name)
   }
 
   private async resolveMentions(raw: unknown): Promise<ReadonlyMap<string, string>> {

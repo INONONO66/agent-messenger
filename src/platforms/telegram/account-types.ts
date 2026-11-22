@@ -23,7 +23,7 @@ export interface TelegramAccountMessage {
   readonly threadId?: string
   readonly botThreadId?: string
   readonly sender:
-    | { readonly kind: 'user'; readonly id: string; readonly isBot: boolean }
+    | { readonly kind: 'user'; readonly id: string; readonly isBot: boolean; readonly name?: string }
     | { readonly kind: 'chat'; readonly id: string }
 }
 
