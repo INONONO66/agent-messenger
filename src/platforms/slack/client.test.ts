@@ -425,6 +425,27 @@ describe('SlackClient', () => {
       )
     })
 
+    it('sends Block Kit blocks with the text as the fallback', async () => {
+      mockWebClient.chat.postMessage.mockResolvedValue({
+        ok: true,
+        ts: '124.1',
+        message: { ts: '124.1', text: 'Title', type: 'message' },
+      })
+
+      const client = await new SlackClient().login({ token: 'xoxc-token', cookie: 'xoxd-cookie' })
+      // @ts-expect-error - accessing private property for testing
+      client.client = mockWebClient as unknown as WebClient
+
+      const blocks = [{ type: 'header', text: { type: 'plain_text', text: 'Title' } }]
+      await client.sendMessage('C123', 'Title', undefined, { blocks })
+      expect(mockWebClient.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C123',
+        text: 'Title',
+        thread_ts: undefined,
+        blocks,
+      })
+    })
+
     it('throws SlackError on API failure', async () => {
       mockWebClient.chat.postMessage.mockResolvedValue({
         ok: false,
