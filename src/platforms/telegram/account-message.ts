@@ -196,9 +196,10 @@ function mediaOf(type: string, body: Body): Media[] | undefined {
 function senderOf(
   sender: AccountMessage['sender_id'],
   userIsBot?: boolean,
+  userName?: string,
 ): TelegramAccountMessage['sender'] | undefined {
   if (sender['@type'] === 'messageSenderUser' && sender.user_id !== undefined && userIsBot !== undefined)
-    return { kind: 'user', id: String(sender.user_id), isBot: userIsBot }
+    return { kind: 'user', id: String(sender.user_id), isBot: userIsBot, ...(userName && { name: userName }) }
   if (sender['@type'] === 'messageSenderChat' && sender.chat_id !== undefined)
     return { kind: 'chat', id: String(sender.chat_id) }
   return undefined
@@ -239,6 +240,7 @@ export function parseAccountMessage(
   chatType?: string,
   resolvedUsernames: ReadonlyMap<string, string> = new Map(),
   userIsBot?: boolean,
+  userName?: string,
 ): TelegramAccountMessage | undefined {
   const typed = Content.safeParse(message.content)
   if (!typed.success) return undefined
@@ -246,7 +248,7 @@ export function parseAccountMessage(
   const formatted = type === 'messageText' ? typed.data.text : typed.data.caption
   if (type === 'messageText' && !formatted) return undefined
   const media = mediaOf(type, typed.data)
-  const sender = senderOf(message.sender_id, userIsBot)
+  const sender = senderOf(message.sender_id, userIsBot, userName)
   const thread = threadOf(message.topic_id)
   if (!media || !sender || !thread) return undefined
   const bot = botMessageId(message.id)
