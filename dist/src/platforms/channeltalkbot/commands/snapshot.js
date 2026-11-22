@@ -1,0 +1,189 @@
+import { Command } from 'commander';
+import { handleError } from '../../../shared/utils/error-handler.js';
+import { formatOutput } from '../../../shared/utils/output.js';
+import { getClient } from './shared.js';
+export async function snapshotAction(options) {
+    try {
+        const client = await getClient(options);
+        const channel = await client.getChannel();
+        const workspace = {
+            id: channel.id,
+            name: channel.name,
+            homepage_url: channel.homepageUrl,
+            description: channel.description,
+        };
+        if (options.full) {
+            return buildFullSnapshot(client, workspace, options);
+        }
+        return buildBriefSnapshot(client, workspace, options);
+    }
+    catch (error) {
+        return { error: error.message };
+    }
+}
+async function buildBriefSnapshot(client, workspace, options) {
+    if (options.groupsOnly) {
+        const groups = await client.listGroups({ limit: 20 });
+        return {
+            workspace,
+            groups: groups.map((g) => ({ id: g.id, name: g.name })),
+            hint: "Use 'group messages <group>' for messages.",
+        };
+    }
+    if (options.chatsOnly) {
+        const [openedChats, snoozedChats, closedChats] = await Promise.all([
+            client.listUserChats({ state: 'opened', limit: 10, sortOrder: 'desc' }),
+            client.listUserChats({ state: 'snoozed', limit: 1 }),
+            client.listUserChats({ state: 'closed', limit: 1 }),
+        ]);
+        return {
+            workspace,
+            user_chats: {
+                opened_count: openedChats.length,
+                snoozed_count: snoozedChats.length,
+                closed_count: closedChats.length,
+            },
+            hint: "Use 'chat list --state opened' for chat details, 'chat messages <chat>' for messages.",
+        };
+    }
+    const [groups, openedChats, snoozedChats, closedChats] = await Promise.all([
+        client.listGroups({ limit: 20 }),
+        client.listUserChats({ state: 'opened', limit: 10, sortOrder: 'desc' }),
+        client.listUserChats({ state: 'snoozed', limit: 1 }),
+        client.listUserChats({ state: 'closed', limit: 1 }),
+    ]);
+    return {
+        workspace,
+        groups: groups.map((g) => ({ id: g.id, name: g.name })),
+        user_chats: {
+            opened_count: openedChats.length,
+            snoozed_count: snoozedChats.length,
+            closed_count: closedChats.length,
+        },
+        hint: "Use 'group messages <group>' for group messages, 'chat list --state opened' for chats, 'manager list' for managers.",
+    };
+}
+async function buildFullSnapshot(client, workspace, options) {
+    const limit = options.limit ?? 5;
+    if (options.groupsOnly) {
+        const groups = await client.listGroups({ limit: 20 });
+        const groupsWithMessages = await Promise.all(groups.map(async (g) => {
+            const messages = await client.getGroupMessages(g.id, { limit, sortOrder: 'desc' });
+            return {
+                id: g.id,
+                name: g.name,
+                messages: messages.map((m) => ({
+                    id: m.id,
+                    person_type: m.personType,
+                    plain_text: m.plainText,
+                    created_at: m.createdAt,
+                })),
+            };
+        }));
+        return { workspace, groups: groupsWithMessages };
+    }
+    if (options.chatsOnly) {
+        const [openedChats, snoozedChats, closedChats] = await Promise.all([
+            client.listUserChats({ state: 'opened', limit: 10, sortOrder: 'desc' }),
+            client.listUserChats({ state: 'snoozed', limit: 1 }),
+            client.listUserChats({ state: 'closed', limit: 1 }),
+        ]);
+        const recentOpened = await Promise.all(openedChats.slice(0, 5).map(async (chat) => {
+            const messages = await client.getUserChatMessages(chat.id, { limit: 1, sortOrder: 'desc' });
+            return {
+                id: chat.id,
+                name: chat.name,
+                user_id: chat.userId,
+                last_message: messages[0]
+                    ? {
+                        id: messages[0].id,
+                        plain_text: messages[0].plainText,
+                        created_at: messages[0].createdAt,
+                    }
+                    : undefined,
+            };
+        }));
+        return {
+            workspace,
+            user_chats: {
+                opened_count: openedChats.length,
+                snoozed_count: snoozedChats.length,
+                closed_count: closedChats.length,
+                recent_opened: recentOpened,
+            },
+        };
+    }
+    const [groups, openedChats, snoozedChats, closedChats, managers, bots] = await Promise.all([
+        client.listGroups({ limit: 20 }),
+        client.listUserChats({ state: 'opened', limit: 10, sortOrder: 'desc' }),
+        client.listUserChats({ state: 'snoozed', limit: 1 }),
+        client.listUserChats({ state: 'closed', limit: 1 }),
+        client.listManagers({ limit: 50 }),
+        client.listBots({ limit: 50 }),
+    ]);
+    const groupsWithMessages = await Promise.all(groups.map(async (g) => {
+        const messages = await client.getGroupMessages(g.id, { limit, sortOrder: 'desc' });
+        return {
+            id: g.id,
+            name: g.name,
+            messages: messages.map((m) => ({
+                id: m.id,
+                person_type: m.personType,
+                plain_text: m.plainText,
+                created_at: m.createdAt,
+            })),
+        };
+    }));
+    const recentOpened = await Promise.all(openedChats.slice(0, 5).map(async (chat) => {
+        const messages = await client.getUserChatMessages(chat.id, { limit: 1, sortOrder: 'desc' });
+        return {
+            id: chat.id,
+            name: chat.name,
+            user_id: chat.userId,
+            last_message: messages[0]
+                ? {
+                    id: messages[0].id,
+                    plain_text: messages[0].plainText,
+                    created_at: messages[0].createdAt,
+                }
+                : undefined,
+        };
+    }));
+    return {
+        workspace,
+        groups: groupsWithMessages,
+        user_chats: {
+            opened_count: openedChats.length,
+            snoozed_count: snoozedChats.length,
+            closed_count: closedChats.length,
+            recent_opened: recentOpened,
+        },
+        managers: managers.map((m) => ({ id: m.id, name: m.name, description: m.description })),
+        bots: bots.map((b) => ({ id: b.id, name: b.name })),
+    };
+}
+export const snapshotCommand = new Command('snapshot')
+    .description('Workspace overview for AI agents (brief by default, use --full for comprehensive data)')
+    .option('--full', 'Include messages, managers, and bots (verbose)')
+    .option('--groups-only', 'List groups only, skip user chats')
+    .option('--chats-only', 'List user chats only, skip groups')
+    .option('--limit <n>', 'Messages per group/chat with --full (default: 5)', '5')
+    .option('--workspace <id>', 'Workspace ID')
+    .option('--bot <name>', 'Bot name')
+    .option('--pretty', 'Pretty print JSON output')
+    .action(async (options) => {
+    try {
+        const result = await snapshotAction({
+            ...options,
+            full: options.full,
+            limit: parseInt(options.limit, 10),
+        });
+        console.log(formatOutput(result, options.pretty));
+        if (result.error)
+            process.exit(1);
+    }
+    catch (error) {
+        handleError(error);
+    }
+});
+//# sourceMappingURL=snapshot.js.map

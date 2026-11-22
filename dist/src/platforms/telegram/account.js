@@ -1,0 +1,746 @@
+import { createReadStream } from 'node:fs';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { z } from 'zod';
+import { AccountMessageSchema, botMessageId, parseAccountMessage, sendTopic } from './account-message.js';
+import { TelegramAccountError, } from './account-types.js';
+import { TdDispatchError, TdReceiver } from './receiver.js';
+import { TdjsonBinding } from './tdlib.js';
+import { TelegramError } from './types.js';
+const Id = z.union([z.number(), z.string()]);
+const Authorization = z.object({ '@type': z.string() });
+const UserFields = z.object({
+    type: Authorization,
+    first_name: z.string().optional(),
+    last_name: z.string().optional(),
+});
+function knownUser(user) {
+    const name = [user.first_name, user.last_name].filter((part) => part !== undefined && part !== '').join(' ');
+    return { isBot: user.type['@type'] === 'userTypeBot', ...(name === '' ? {} : { name }) };
+}
+const File = z.object({
+    id: z.number(),
+    size: z.number(),
+    local: z.object({
+        path: z.string(),
+        is_downloading_completed: z.boolean(),
+        is_downloading_active: z.boolean().optional(),
+    }),
+});
+function failure(event, fallback, requestRefused = false) {
+    const message = String(event.error_message ?? event.message ?? 'TDLib request failed');
+    const code = /database.*(lock|use)|lock.*database|another instance/i.test(message)
+        ? 'session_in_use'
+        : /unauthorized|auth_key_unregistered|session.revoked|session_expired/i.test(message)
+            ? 'session_lost'
+            : /file.*(too[\s_]*(big|large)|size.*limit)/i.test(message)
+                ? 'media_too_large'
+                : fallback;
+    return new TelegramAccountError(message, code, requestRefused);
+}
+function loginAction(state) {
+    switch (state) {
+        case 'authorizationStateWaitPhoneNumber':
+            return 'phone';
+        case 'authorizationStateWaitCode':
+            return 'code';
+        case 'authorizationStateWaitPassword':
+            return 'password';
+        case 'authorizationStateWaitEmailAddress':
+            return 'email';
+        case 'authorizationStateWaitEmailCode':
+            return 'email_code';
+        case 'authorizationStateReady':
+            return 'ready';
+        default:
+            throw new TelegramAccountError(`Unsupported authorization state: ${state}`, 'session_lost');
+    }
+}
+const NATIVE_CLOSING = new Set([
+    'authorizationStateClosed',
+    'authorizationStateClosing',
+    'authorizationStateLoggingOut',
+]);
+const SenderUser = z.object({ sender_id: z.object({ '@type': z.literal('messageSenderUser'), user_id: Id }) });
+const InputFile = z.object({ '@type': z.literal('inputFileLocal'), path: z.string() });
+const Caption = z.object({ '@type': z.literal('formattedText'), text: z.string(), entities: z.array(z.unknown()) });
+const InputMessageContent = z.discriminatedUnion('@type', [
+    z.object({ '@type': z.literal('inputMessageText'), text: Caption }),
+    z.object({ '@type': z.literal('inputMessagePhoto'), photo: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageAudio'), audio: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageVoiceNote'), voice_note: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageVideo'), video: InputFile, caption: Caption }),
+    z.object({ '@type': z.literal('inputMessageDocument'), document: InputFile, caption: Caption }),
+]);
+function sendKey(chatId, messageId) {
+    return `${chatId}:${messageId}`;
+}
+function stagedFilename(name) {
+    const segment = name
+        .split(/[\\/]/)
+        .at(-1)
+        ?.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return segment && segment !== '.' && segment !== '..' ? segment : 'upload';
+}
+function inputContent(content, stagedPath, formatted) {
+    const caption = formatted ?? {
+        '@type': 'formattedText',
+        text: content.kind === 'text' ? content.text : (content.caption ?? ''),
+        entities: [],
+    };
+    if (content.kind === 'text')
+        return { '@type': 'inputMessageText', text: caption };
+    const file = { '@type': 'inputFileLocal', path: stagedPath ?? ('path' in content ? content.path : '') };
+    switch (content.kind) {
+        case 'image':
+            return { '@type': 'inputMessagePhoto', photo: file, caption };
+        case 'audio':
+            return { '@type': 'inputMessageAudio', audio: file, caption };
+        case 'voice':
+            return { '@type': 'inputMessageVoiceNote', voice_note: file, caption };
+        case 'video':
+            return { '@type': 'inputMessageVideo', video: file, caption };
+        case 'file':
+            return { '@type': 'inputMessageDocument', document: file, caption };
+    }
+}
+function confirmed(confirmation) {
+    if (confirmation['@type'] === 'updateDeleteMessages')
+        throw new TelegramAccountError('Temporary message deleted before confirmation', 'unknown');
+    if (confirmation['@type'] === 'updateMessageSendFailed') {
+        const error = z.object({ message: z.string(), code: z.number() }).safeParse(confirmation.error);
+        throw new TelegramAccountError(error.success ? error.data.message : 'TDLib send failed', 'not_sent');
+    }
+    const message = z.object({ id: Id }).safeParse(confirmation.message);
+    if (!message.success)
+        throw new TelegramAccountError('Invalid send confirmation', 'unknown');
+    const bot = botMessageId(message.data.id);
+    return { messageId: String(message.data.id), ...(bot && { botMessageId: bot }) };
+}
+class AccountClient {
+    suppliedBinding;
+    deadline;
+    binding;
+    receiver;
+    clientId;
+    unsubscribe;
+    authorization;
+    chats = new Map();
+    media = new Map();
+    handlers = new Set();
+    stateHandlers = new Set();
+    users = new Map();
+    filesDir;
+    ready = false;
+    lastState;
+    closing = false;
+    terminal = false;
+    nativeClosed = false;
+    closeTask;
+    sent = new Map();
+    sentWaiters = new Map();
+    constructor(suppliedBinding, deadline = setTimeout) {
+        this.suppliedBinding = suppliedBinding;
+        this.deadline = deadline;
+    }
+    async open() {
+        if (this.receiver)
+            return;
+        try {
+            this.binding = this.suppliedBinding ?? (await TdjsonBinding.create());
+        }
+        catch (error) {
+            if (error instanceof TelegramError && error.code === 'tdlib_not_found') {
+                throw new TelegramAccountError(error.message, 'tdlib_not_found');
+            }
+            throw error;
+        }
+        // close() may end the account while start() awaits its directories or the binding; no native client follows.
+        if (this.terminal)
+            throw new TelegramAccountError('Account is closed', 'session_lost');
+        this.receiver = TdReceiver.for(this.binding);
+        this.clientId = this.binding.createClientId();
+        this.unsubscribe = this.receiver.on(this.clientId, (event) => this.onEvent(event));
+    }
+    onEvent(event) {
+        switch (event['@type']) {
+            case 'updateAuthorizationState':
+                return this.onAuthorization(event);
+            case 'receiverFailure':
+                return this.end('session_lost');
+            case 'updateUser':
+                return this.onUser(event);
+            case 'updateNewChat':
+                return this.onChat(event);
+            case 'updateNewMessage':
+                return this.onNewMessage(event);
+            case 'updateMessageSendSucceeded':
+            case 'updateMessageSendFailed':
+                return this.onSendOutcome(event);
+            case 'updateDeleteMessages':
+                return this.onDeleted(event);
+            default:
+                return undefined;
+        }
+    }
+    onAuthorization(event) {
+        const parsed = Authorization.safeParse(event.authorization_state);
+        if (!parsed.success)
+            return;
+        const state = parsed.data['@type'];
+        this.authorization = state;
+        if (state === 'authorizationStateClosed')
+            this.nativeClosed = true;
+        // TDLib announces parameter setup natively before any login step; start() submits the parameters.
+        if (state === 'authorizationStateWaitTdlibParameters')
+            return;
+        if (NATIVE_CLOSING.has(state))
+            return this.end(this.closing ? 'closed' : 'session_lost');
+        if (state !== 'authorizationStateReady')
+            return this.requireLogin(state);
+        if (!this.ready)
+            void this.status().catch(() => this.end('session_lost'));
+    }
+    requireLogin(state) {
+        let action;
+        try {
+            action = loginAction(state);
+        }
+        catch (error) {
+            if (error instanceof TelegramAccountError)
+                return this.end('session_lost');
+            throw error;
+        }
+        if (action === 'ready')
+            return;
+        if (this.ready)
+            this.handlers.clear();
+        this.ready = false;
+        this.emitState({ state: 'login_action_required', action });
+    }
+    onUser(event) {
+        const user = UserFields.extend({ id: Id }).safeParse(event.user);
+        if (user.success && user.data.type['@type'] !== 'userTypeUnknown')
+            this.users.set(String(user.data.id), knownUser(user.data));
+    }
+    onChat(event) {
+        const chat = z.object({ id: Id, type: Authorization }).safeParse(event.chat);
+        if (chat.success)
+            this.chats.set(String(chat.data.id), chat.data.type['@type']);
+    }
+    onNewMessage(event) {
+        const message = AccountMessageSchema.safeParse(event.message);
+        if (message.success)
+            void this.publishMessage(message.data, String(message.data.chat_id)).catch(() => this.end('session_lost'));
+    }
+    // Temporary message ids are unique only within their chat, so confirmations correlate by chat and id.
+    onSendOutcome(event) {
+        const outcome = z.object({ old_message_id: Id, message: z.object({ chat_id: Id }) }).safeParse(event);
+        if (outcome.success)
+            this.settleSend(sendKey(outcome.data.message.chat_id, outcome.data.old_message_id), event);
+    }
+    onDeleted(event) {
+        const deleted = z.object({ chat_id: Id, message_ids: z.array(Id) }).safeParse(event);
+        if (!deleted.success)
+            return;
+        for (const id of deleted.data.message_ids)
+            this.settleSend(sendKey(deleted.data.chat_id, id), event);
+    }
+    settleSend(key, event) {
+        const waiter = this.sentWaiters.get(key);
+        if (!waiter) {
+            this.sent.set(key, event);
+            return;
+        }
+        this.sentWaiters.delete(key);
+        waiter.resolve(event);
+    }
+    emitState(state) {
+        const key = JSON.stringify(state);
+        if (key === this.lastState)
+            return;
+        this.lastState = key;
+        for (const handler of this.stateHandlers)
+            handler(state);
+    }
+    end(reason) {
+        if (this.terminal)
+            return;
+        this.terminal = true;
+        this.handlers.clear();
+        for (const waiter of this.sentWaiters.values())
+            waiter.reject(new TelegramAccountError('Account closed before send confirmation', 'unknown'));
+        this.sentWaiters.clear();
+        this.emitState({ state: 'closed', reason });
+    }
+    async senderUser(id) {
+        if (id === undefined)
+            return undefined;
+        const cached = this.users.get(String(id));
+        if (cached !== undefined)
+            return cached;
+        const user = UserFields.safeParse(await this.call({ '@type': 'getUser', user_id: id }, 'session_lost'));
+        if (!user.success)
+            throw new TelegramAccountError('Sender user type unavailable', 'session_lost');
+        if (user.data.type['@type'] === 'userTypeUnknown')
+            throw new TelegramAccountError('Sender user type unavailable', 'session_lost');
+        const known = knownUser(user.data);
+        this.users.set(String(id), known);
+        return known;
+    }
+    async publishMessage(raw, chatId) {
+        const chatType = await this.chatType(chatId);
+        const message = await this.parseMessage(raw, chatType);
+        if (message && this.ready && !this.terminal) {
+            for (const item of message.media)
+                this.media.set(item.fileId, item);
+            for (const handler of this.handlers)
+                handler(message);
+        }
+    }
+    async parseMessage(raw, chatType) {
+        const mentions = await this.resolveMentions(raw);
+        const user = await this.senderUser(SenderUser.safeParse(raw).data?.sender_id.user_id);
+        return parseAccountMessage(raw, chatType, mentions, user?.isBot, user?.name);
+    }
+    async resolveMentions(raw) {
+        const result = new Map();
+        const parsed = z
+            .object({
+            content: z.object({
+                text: z.object({ text: z.string(), entities: z.array(z.unknown()) }).optional(),
+                caption: z.object({ text: z.string(), entities: z.array(z.unknown()) }).optional(),
+            }),
+        })
+            .safeParse(raw);
+        if (!parsed.success)
+            return result;
+        const formatted = parsed.data.content.text ?? parsed.data.content.caption;
+        if (!formatted)
+            return result;
+        for (const rawEntity of formatted.entities) {
+            const entity = z
+                .object({
+                offset: z.number(),
+                length: z.number(),
+                type: z.object({ '@type': z.literal('textEntityTypeMention') }),
+            })
+                .safeParse(rawEntity);
+            if (!entity.success)
+                continue;
+            const username = formatted.text
+                .slice(entity.data.offset, entity.data.offset + entity.data.length)
+                .replace(/^@/, '')
+                .toLowerCase();
+            try {
+                const chat = await this.call({ '@type': 'searchPublicChat', username }, 'history_unavailable');
+                const user = z
+                    .object({ type: z.object({ '@type': z.literal('chatTypePrivate'), user_id: Id }) })
+                    .safeParse(chat);
+                if (user.success)
+                    result.set(username, String(user.data.type.user_id));
+            }
+            catch (error) {
+                if (!(error instanceof TelegramAccountError))
+                    throw error;
+            }
+        }
+        return result;
+    }
+    async chatType(chatId) {
+        if (this.chats.has(chatId))
+            return this.chats.get(chatId);
+        try {
+            const chat = await this.call({ '@type': 'getChat', chat_id: chatId }, 'history_unavailable');
+            const parsed = z.object({ type: Authorization }).safeParse(chat);
+            if (parsed.success) {
+                this.chats.set(chatId, parsed.data.type['@type']);
+                return parsed.data.type['@type'];
+            }
+        }
+        catch (error) {
+            if (!(error instanceof TelegramAccountError))
+                throw error;
+        }
+        return undefined;
+    }
+    async call(query, code, signal) {
+        if (!this.receiver || this.clientId === undefined)
+            throw new TelegramAccountError('Client is not started', 'session_lost');
+        try {
+            const event = await this.receiver.request(this.clientId, query, 15000, signal);
+            if (event['@type'] === 'error')
+                throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code, query['@type'] === 'sendMessage');
+            return event;
+        }
+        catch (error) {
+            if (error instanceof TelegramAccountError)
+                throw error;
+            if (error instanceof TdDispatchError && query['@type'] === 'sendMessage')
+                throw error;
+            throw new TelegramAccountError(error instanceof Error ? error.message : String(error), code);
+        }
+    }
+    waitUpdate(predicate, timeoutMs = 30000) {
+        if (!this.receiver || this.clientId === undefined)
+            throw new TelegramAccountError('Client is not started', 'session_lost');
+        let cancel = (_error) => { };
+        let matched = (_event) => { };
+        // Subscribing outside the executor lets a failed receiver throw to the caller instead of an unobserved rejection.
+        const stop = this.receiver.on(this.clientId, (event) => {
+            if (predicate(event))
+                matched(event);
+        });
+        const promise = new Promise((resolve, reject) => {
+            const timer = this.deadline(() => {
+                stop();
+                reject(new TelegramAccountError('Timed out waiting for TDLib update', 'unknown'));
+            }, timeoutMs);
+            matched = (event) => {
+                clearTimeout(timer);
+                stop();
+                resolve(event);
+            };
+            cancel = (error) => {
+                clearTimeout(timer);
+                stop();
+                if (error)
+                    reject(error);
+            };
+        });
+        return { promise, cancel };
+    }
+    async status() {
+        const state = this.authorization;
+        if (!state)
+            throw new TelegramAccountError('No authorization state', 'session_lost');
+        const action = loginAction(state);
+        if (action !== 'ready') {
+            this.emitState({ state: 'login_action_required', action });
+            return { state: action };
+        }
+        const me = z.object({ id: Id }).parse(await this.call({ '@type': 'getMe' }, 'session_lost'));
+        if (this.terminal)
+            throw new TelegramAccountError('Account closed before ready', 'session_lost');
+        this.ready = true;
+        this.emitState({ state: 'ready', userId: String(me.id) });
+        return { state: 'ready', userId: String(me.id) };
+    }
+    async start(input) {
+        if (this.terminal)
+            throw new TelegramAccountError('Account is closed', 'session_lost');
+        await mkdir(input.databaseDir, { recursive: true, mode: 0o700 });
+        await mkdir(input.filesDir, { recursive: true, mode: 0o700 });
+        this.filesDir = input.filesDir;
+        await this.open();
+        const state = await this.call({ '@type': 'getAuthorizationState' }, 'session_lost');
+        this.authorization = Authorization.parse(state)['@type'];
+        if (this.authorization === 'authorizationStateWaitTdlibParameters') {
+            const next = this.waitUpdate((event) => event['@type'] === 'updateAuthorizationState' &&
+                Authorization.safeParse(event.authorization_state).data?.['@type'] !==
+                    'authorizationStateWaitTdlibParameters');
+            try {
+                await this.call({
+                    '@type': 'setTdlibParameters',
+                    api_id: input.apiId,
+                    api_hash: input.apiHash,
+                    database_directory: input.databaseDir,
+                    files_directory: input.filesDir,
+                    use_file_database: true,
+                    use_chat_info_database: true,
+                    use_message_database: true,
+                    use_secret_chats: true,
+                    database_encryption_key: '',
+                    system_language_code: 'en',
+                    device_model: 'agent-messenger',
+                    system_version: `${process.platform}-${process.arch}`,
+                    application_version: 'agent-messenger',
+                }, 'session_lost');
+                this.authorization = Authorization.parse((await next.promise).authorization_state)['@type'];
+            }
+            finally {
+                next.cancel();
+            }
+        }
+        return this.status();
+    }
+    async authenticate(input) {
+        const state = this.authorization;
+        if (!state)
+            throw new TelegramAccountError('Start the client before authentication', 'session_lost');
+        if (state === 'authorizationStateReady')
+            return this.status();
+        const query = state === 'authorizationStateWaitPhoneNumber' && input.phone
+            ? { '@type': 'setAuthenticationPhoneNumber', phone_number: input.phone, settings: null }
+            : state === 'authorizationStateWaitCode' && input.code
+                ? { '@type': 'checkAuthenticationCode', code: input.code }
+                : state === 'authorizationStateWaitPassword' && input.password
+                    ? { '@type': 'checkAuthenticationPassword', password: input.password }
+                    : state === 'authorizationStateWaitEmailAddress' && input.email
+                        ? { '@type': 'setAuthenticationEmailAddress', email_address: input.email }
+                        : state === 'authorizationStateWaitEmailCode' && input.emailCode
+                            ? {
+                                '@type': 'checkAuthenticationEmailCode',
+                                code: { '@type': 'emailAddressAuthenticationCode', code: input.emailCode },
+                            }
+                            : {};
+        if (!query['@type'])
+            throw new TelegramAccountError(`Input required for ${state}`, 'login_action_required');
+        const next = this.waitUpdate((event) => event['@type'] === 'updateAuthorizationState' &&
+            Authorization.safeParse(event.authorization_state).data?.['@type'] !== state);
+        try {
+            await this.call(query, 'session_lost');
+            this.authorization = Authorization.parse((await next.promise).authorization_state)['@type'];
+        }
+        finally {
+            next.cancel();
+        }
+        return this.status();
+    }
+    onMessage(handler) {
+        this.handlers.add(handler);
+        return () => this.handlers.delete(handler);
+    }
+    onState(handler) {
+        this.stateHandlers.add(handler);
+        return () => {
+            this.stateHandlers.delete(handler);
+        };
+    }
+    async history(chatId, options) {
+        if (!this.ready || this.terminal)
+            throw new TelegramAccountError('Account is not ready', 'session_lost');
+        const cursor = options.before === undefined ? 0 : Number(options.before) - 1;
+        if (options.before !== undefined &&
+            (!Number.isSafeInteger(Number(options.before)) || !Number.isSafeInteger(cursor) || cursor < 1))
+            throw new TelegramAccountError('Invalid history cursor', 'history_unavailable');
+        const result = await this.call({
+            '@type': 'getChatHistory',
+            chat_id: chatId,
+            from_message_id: cursor,
+            offset: 0,
+            limit: options.limit,
+            only_local: false,
+        }, 'history_unavailable');
+        const page = z.object({ messages: z.array(AccountMessageSchema) }).safeParse(result);
+        if (!page.success)
+            throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable');
+        const chatType = await this.chatType(chatId);
+        const messages = [];
+        for (const raw of page.data.messages) {
+            const parsed = await this.parseMessage(raw, chatType);
+            if (!parsed)
+                throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable');
+            messages.push(parsed);
+            for (const item of parsed.media)
+                this.media.set(item.fileId, item);
+        }
+        const oldest = messages.at(-1);
+        return { messages, ...(oldest && { before: oldest.messageId }) };
+    }
+    async download(fileId, options) {
+        if (!this.ready || this.terminal)
+            throw new TelegramAccountError('Account is not ready', 'session_lost');
+        if (options.signal.aborted)
+            throw new TelegramAccountError('Download aborted', 'download_failed');
+        const completed = this.waitUpdate((event) => {
+            if (event['@type'] !== 'updateFile')
+                return false;
+            const parsed = File.safeParse(event.file);
+            return (parsed.success &&
+                parsed.data.id === fileId &&
+                (parsed.data.local.is_downloading_completed || parsed.data.local.is_downloading_active === false));
+        });
+        const completion = completed.promise.then((event) => ({ event }), (error) => ({ error }));
+        const abort = () => {
+            if (this.binding && this.clientId !== undefined)
+                this.binding.send(this.clientId, { '@type': 'cancelDownloadFile', file_id: fileId, only_if_pending: false });
+            completed.cancel(new TelegramAccountError('Download aborted', 'download_failed'));
+        };
+        options.signal.addEventListener('abort', abort, { once: true });
+        try {
+            const reply = await this.call({ '@type': 'downloadFile', file_id: fileId, priority: 1, offset: 0, limit: 0, synchronous: false }, 'download_failed', options.signal);
+            const first = File.parse(reply);
+            const outcome = first.local.is_downloading_completed ? undefined : await completion;
+            if (outcome && 'error' in outcome)
+                throw outcome.error;
+            const file = outcome ? File.parse(outcome.event.file) : first;
+            completed.cancel();
+            if (!file.local.is_downloading_completed)
+                throw new TelegramAccountError('TDLib download stopped before completion', 'download_failed');
+            const expectedSize = this.media.get(fileId)?.size ?? file.size;
+            if (!file.local.path || file.size !== expectedSize || (await stat(file.local.path)).size !== expectedSize)
+                throw new TelegramAccountError('Downloaded file size mismatch', 'download_failed');
+            const chunks = async function* () {
+                let bytes = 0;
+                try {
+                    for await (const chunk of createReadStream(file.local.path, {
+                        highWaterMark: 64 * 1024,
+                        signal: options.signal,
+                    })) {
+                        bytes += chunk.length;
+                        if (bytes > expectedSize)
+                            throw new TelegramAccountError('Downloaded file exceeded expected size', 'download_failed');
+                        yield chunk;
+                    }
+                    if (bytes !== expectedSize)
+                        throw new TelegramAccountError('Downloaded file size mismatch', 'download_failed');
+                }
+                catch (error) {
+                    if (error instanceof TelegramAccountError)
+                        throw error;
+                    throw new TelegramAccountError(error instanceof Error ? error.message : String(error), 'download_failed');
+                }
+                finally {
+                    options.signal.removeEventListener('abort', abort);
+                }
+            };
+            const metadata = this.media.get(fileId);
+            return { chunks: chunks(), name: metadata?.name ?? '', mime: metadata?.mime ?? '', size: expectedSize };
+        }
+        catch (error) {
+            completed.cancel();
+            options.signal.removeEventListener('abort', abort);
+            if (error instanceof TelegramAccountError && error.code === 'download_failed')
+                throw error;
+            throw new TelegramAccountError(error instanceof Error ? error.message : String(error), 'download_failed');
+        }
+    }
+    async send(chatId, content) {
+        if (!this.ready || this.terminal)
+            throw new TelegramAccountError('Account is not ready', 'not_sent');
+        let topic_id;
+        try {
+            topic_id = sendTopic(content.threadId);
+        }
+        catch {
+            throw new TelegramAccountError('Invalid Telegram thread identifier', 'not_sent');
+        }
+        const bytes = 'bytes' in content ? content.bytes : undefined;
+        if (bytes && bytes.byteLength > 50 * 1024 * 1024)
+            throw new TelegramAccountError('Outbound file exceeds byte limit', 'media_too_large');
+        if (bytes && !this.filesDir)
+            throw new TelegramAccountError('Client is not started', 'not_sent');
+        let stage;
+        try {
+            if (bytes)
+                stage = await mkdtemp(join(this.filesDir ?? '', 'outbound-'));
+            const stagedPath = stage && 'name' in content ? join(stage, stagedFilename(content.name)) : undefined;
+            if (stagedPath && bytes)
+                await writeFile(stagedPath, bytes, { flag: 'wx', mode: 0o600 });
+            return await this.sendPrepared(chatId, content, topic_id, stagedPath);
+        }
+        catch (error) {
+            if (error instanceof TelegramAccountError)
+                throw error;
+            throw new TelegramAccountError(error instanceof Error ? error.message : String(error), 'not_sent');
+        }
+        finally {
+            if (stage)
+                await rm(stage, { recursive: true, force: true });
+        }
+    }
+    async markdownText(text) {
+        const parse_mode = { '@type': 'textParseModeMarkdown', version: 2 };
+        const parsed = Caption.safeParse(await this.call({ '@type': 'parseTextEntities', text, parse_mode }, 'invalid_markdown'));
+        if (!parsed.success)
+            throw new TelegramAccountError('TDLib returned no formatted text', 'invalid_markdown');
+        return parsed.data;
+    }
+    async sendPrepared(chatId, content, topic_id, stagedPath) {
+        if (!this.ready || this.terminal)
+            throw new TelegramAccountError('Account is not ready', 'not_sent');
+        const reply_to = content.replyTo ? { '@type': 'inputMessageReplyToMessage', message_id: content.replyTo } : null;
+        const formatted = content.kind === 'text' && content.markdown ? await this.markdownText(content.text) : undefined;
+        const input_message_content = inputContent(content, stagedPath, formatted);
+        let reply;
+        try {
+            reply = await this.call({ '@type': 'sendMessage', chat_id: chatId, reply_to, topic_id, input_message_content }, 'unknown');
+        }
+        catch (error) {
+            if (error instanceof TdDispatchError)
+                throw new TelegramAccountError(error.message, 'not_sent');
+            throw error;
+        }
+        const pending = z.object({ id: Id }).safeParse(reply);
+        if (!pending.success)
+            throw new TelegramAccountError('Missing temporary send id', 'unknown');
+        if (this.terminal)
+            throw new TelegramAccountError('Account closed before send confirmation', 'unknown');
+        const key = sendKey(chatId, pending.data.id);
+        const confirmation = this.sent.get(key) ?? (await this.awaitConfirmation(key));
+        this.sent.delete(key);
+        return confirmed(confirmation);
+    }
+    awaitConfirmation(key) {
+        return new Promise((resolve, reject) => {
+            const timer = this.deadline(() => {
+                this.sentWaiters.delete(key);
+                reject(new TelegramAccountError('Send confirmation timed out', 'unknown'));
+            }, 10000);
+            this.sentWaiters.set(key, {
+                resolve: (event) => {
+                    clearTimeout(timer);
+                    resolve(event);
+                },
+                reject: (error) => {
+                    clearTimeout(timer);
+                    reject(error);
+                },
+            });
+        });
+    }
+    // A failed receiver cannot observe native closure, so the close outcome is unconfirmed.
+    closedUpdate() {
+        try {
+            return this.waitUpdate((event) => event['@type'] === 'updateAuthorizationState' &&
+                Authorization.safeParse(event.authorization_state).data?.['@type'] === 'authorizationStateClosed');
+        }
+        catch (error) {
+            if (error instanceof TelegramAccountError)
+                throw error;
+            throw new TelegramAccountError(error instanceof Error ? error.message : String(error), 'unknown');
+        }
+    }
+    // Logical termination does not close the TDLib database; every started client awaits native closure once.
+    async close() {
+        if (this.closeTask)
+            return this.closeTask;
+        if (!this.receiver) {
+            this.end('closed');
+            return;
+        }
+        this.closeTask = this.shutdown();
+        return this.closeTask;
+    }
+    async shutdown() {
+        if (!this.terminal)
+            this.closing = true;
+        try {
+            await this.closeNative();
+        }
+        finally {
+            this.end('closed');
+            this.unsubscribe?.();
+            this.receiver = undefined;
+        }
+    }
+    async closeNative() {
+        if (this.nativeClosed)
+            return;
+        const closed = this.closedUpdate();
+        try {
+            if (!this.authorization || !NATIVE_CLOSING.has(this.authorization))
+                await this.call({ '@type': 'close' }, 'unknown');
+            await closed.promise;
+        }
+        finally {
+            closed.cancel();
+        }
+    }
+}
+// The optional binding and deadline are internal fake seams; the package entry exports only the zero-argument factory.
+export function createAccountClient(binding, deadline) {
+    return new AccountClient(binding, deadline);
+}
+//# sourceMappingURL=account.js.map

@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+import { Command } from 'commander';
+import pkg from '../../../package.json' with { type: 'json' };
+import { authCommand, channelCommand, chatCommand, fileCommand, messageCommand, reactionCommand, snapshotCommand, teamCommand, userCommand, whoamiCommand, } from './commands/index.js';
+import { TeamsCredentialManager } from './credential-manager.js';
+import { ensureTeamsAuth } from './ensure-auth.js';
+function isAuthCommand(command) {
+    let cmd = command;
+    while (cmd) {
+        if (cmd.name() === 'auth')
+            return true;
+        cmd = cmd.parent;
+    }
+    return false;
+}
+const program = new Command();
+program
+    .name('agent-teams')
+    .description('CLI tool for Microsoft Teams communication')
+    .version(pkg.version)
+    .option('--team <id>', 'Use specific team')
+    .option('--account <type>', 'Use specific account (work or personal)');
+program.hook('preAction', async (_thisCommand, actionCommand) => {
+    if (isAuthCommand(actionCommand))
+        return;
+    const opts = program.opts();
+    if (opts.account) {
+        TeamsCredentialManager.accountOverride = opts.account;
+    }
+    await ensureTeamsAuth();
+});
+program.addCommand(authCommand);
+program.addCommand(teamCommand);
+program.addCommand(channelCommand);
+program.addCommand(chatCommand);
+program.addCommand(fileCommand);
+program.addCommand(messageCommand);
+program.addCommand(reactionCommand);
+program.addCommand(snapshotCommand);
+program.addCommand(userCommand);
+program.addCommand(whoamiCommand);
+program.parse(process.argv);
+export default program;
+//# sourceMappingURL=cli.js.map
