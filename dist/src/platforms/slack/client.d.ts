@@ -31,7 +31,9 @@ export declare class SlackClient {
     }): Promise<SlackDM[]>;
     getChannel(id: string): Promise<SlackChannel>;
     resolveChannel(channel: string): Promise<string>;
-    sendMessage(channel: string, text: string, threadTs?: string): Promise<SlackMessage>;
+    sendMessage(channel: string, text: string, threadTs?: string, options?: {
+        readonly blocks?: unknown[];
+    }): Promise<SlackMessage>;
     getMessages(channel: string, limitOrOptions?: number | {
         limit?: number;
         oldest?: string;

@@ -157,12 +157,13 @@ export class SlackClient {
         }
         return found.id;
     }
-    async sendMessage(channel, text, threadTs) {
+    async sendMessage(channel, text, threadTs, options) {
         return this.withRetry(async () => {
             const response = await this.ensureAuth().chat.postMessage({
                 channel,
                 text,
                 thread_ts: threadTs,
+                ...(options?.blocks && { blocks: options.blocks }),
             });
             this.checkResponse(response);
             return mapMessage(response.message, { ts: response.ts, text, type: 'message' });
