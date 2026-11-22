@@ -173,9 +173,9 @@ function mediaOf(type, body) {
     const item = extract(body);
     return item ? [item] : undefined;
 }
-function senderOf(sender, userIsBot) {
+function senderOf(sender, userIsBot, userName) {
     if (sender['@type'] === 'messageSenderUser' && sender.user_id !== undefined && userIsBot !== undefined)
-        return { kind: 'user', id: String(sender.user_id), isBot: userIsBot };
+        return { kind: 'user', id: String(sender.user_id), isBot: userIsBot, ...(userName && { name: userName }) };
     if (sender['@type'] === 'messageSenderChat' && sender.chat_id !== undefined)
         return { kind: 'chat', id: String(sender.chat_id) };
     return undefined;
@@ -205,7 +205,7 @@ function replyOf(message) {
     const bot = shared ? botMessageId(reply.message_id) : undefined;
     return { replyToMessageId: String(reply.message_id), ...(bot && { botReplyToMessageId: bot }) };
 }
-export function parseAccountMessage(message, chatType, resolvedUsernames = new Map(), userIsBot) {
+export function parseAccountMessage(message, chatType, resolvedUsernames = new Map(), userIsBot, userName) {
     const typed = Content.safeParse(message.content);
     if (!typed.success)
         return undefined;
@@ -214,7 +214,7 @@ export function parseAccountMessage(message, chatType, resolvedUsernames = new M
     if (type === 'messageText' && !formatted)
         return undefined;
     const media = mediaOf(type, typed.data);
-    const sender = senderOf(message.sender_id, userIsBot);
+    const sender = senderOf(message.sender_id, userIsBot, userName);
     const thread = threadOf(message.topic_id);
     if (!media || !sender || !thread)
         return undefined;

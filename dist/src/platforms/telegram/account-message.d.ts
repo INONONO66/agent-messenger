@@ -55,6 +55,6 @@ export declare function sendTopic(threadId: string | undefined): {
     saved_messages_topic_id: number;
 } | null;
 type AccountMessage = z.infer<typeof AccountMessageSchema>;
-export declare function parseAccountMessage(message: AccountMessage, chatType?: string, resolvedUsernames?: ReadonlyMap<string, string>, userIsBot?: boolean): TelegramAccountMessage | undefined;
+export declare function parseAccountMessage(message: AccountMessage, chatType?: string, resolvedUsernames?: ReadonlyMap<string, string>, userIsBot?: boolean, userName?: string): TelegramAccountMessage | undefined;
 export {};
 //# sourceMappingURL=account-message.d.ts.map

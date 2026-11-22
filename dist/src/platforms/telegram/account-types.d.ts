@@ -25,6 +25,7 @@ export interface TelegramAccountMessage {
         readonly kind: 'user';
         readonly id: string;
         readonly isBot: boolean;
+        readonly name?: string;
     } | {
         readonly kind: 'chat';
         readonly id: string;
@@ -39,6 +40,8 @@ export type TelegramSendContent = {
     readonly text: string;
     readonly replyTo?: string;
     readonly threadId?: string;
+    /** The text is Telegram HTML or MarkdownV2; TDLib turns it into formatting, and text it cannot parse is invalid_formatting. */
+    readonly parseMode?: 'html' | 'markdownv2';
 } | {
     readonly kind: 'image' | 'audio' | 'voice' | 'video' | 'file';
     readonly path: string;
@@ -105,7 +108,7 @@ export interface TelegramAccountClient {
     }>;
     close(): Promise<void>;
 }
-export type TelegramAccountErrorCode = 'tdlib_not_found' | 'session_in_use' | 'session_lost' | 'login_action_required' | 'media_too_large' | 'download_failed' | 'history_unavailable' | 'not_sent' | 'unknown';
+export type TelegramAccountErrorCode = 'tdlib_not_found' | 'session_in_use' | 'session_lost' | 'login_action_required' | 'media_too_large' | 'download_failed' | 'history_unavailable' | 'not_sent' | 'invalid_formatting' | 'unknown';
 export declare class TelegramAccountError extends Error {
     readonly code: TelegramAccountErrorCode;
     readonly requestRefused: boolean;

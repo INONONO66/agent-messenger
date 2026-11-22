@@ -9,6 +9,15 @@ import { TdjsonBinding } from './tdlib.js';
 import { TelegramError } from './types.js';
 const Id = z.union([z.number(), z.string()]);
 const Authorization = z.object({ '@type': z.string() });
+const UserFields = z.object({
+    type: Authorization,
+    first_name: z.string().optional(),
+    last_name: z.string().optional(),
+});
+function knownUser(user) {
+    const name = [user.first_name, user.last_name].filter((part) => part !== undefined && part !== '').join(' ');
+    return { isBot: user.type['@type'] === 'userTypeBot', ...(name === '' ? {} : { name }) };
+}
 const File = z.object({
     id: z.number(),
     size: z.number(),
@@ -54,7 +63,7 @@ const NATIVE_CLOSING = new Set([
 ]);
 const SenderUser = z.object({ sender_id: z.object({ '@type': z.literal('messageSenderUser'), user_id: Id }) });
 const InputFile = z.object({ '@type': z.literal('inputFileLocal'), path: z.string() });
-const Caption = z.object({ '@type': z.literal('formattedText'), text: z.string(), entities: z.array(z.never()) });
+const Caption = z.object({ '@type': z.literal('formattedText'), text: z.string(), entities: z.array(z.unknown()) });
 const InputMessageContent = z.discriminatedUnion('@type', [
     z.object({ '@type': z.literal('inputMessageText'), text: Caption }),
     z.object({ '@type': z.literal('inputMessagePhoto'), photo: InputFile, caption: Caption }),
@@ -73,8 +82,8 @@ function stagedFilename(name) {
         ?.replace(/[^a-zA-Z0-9._-]/g, '_');
     return segment && segment !== '.' && segment !== '..' ? segment : 'upload';
 }
-function inputContent(content, stagedPath) {
-    const caption = {
+function inputContent(content, stagedPath, formatted) {
+    const caption = formatted ?? {
         '@type': 'formattedText',
         text: content.kind === 'text' ? content.text : (content.caption ?? ''),
         entities: [],
@@ -210,9 +219,9 @@ class AccountClient {
         this.emitState({ state: 'login_action_required', action });
     }
     onUser(event) {
-        const user = z.object({ id: Id, type: Authorization }).safeParse(event.user);
+        const user = UserFields.extend({ id: Id }).safeParse(event.user);
         if (user.success && user.data.type['@type'] !== 'userTypeUnknown')
-            this.users.set(String(user.data.id), user.data.type['@type'] === 'userTypeBot');
+            this.users.set(String(user.data.id), knownUser(user.data));
     }
     onChat(event) {
         const chat = z.object({ id: Id, type: Authorization }).safeParse(event.chat);
@@ -264,23 +273,20 @@ class AccountClient {
         this.sentWaiters.clear();
         this.emitState({ state: 'closed', reason });
     }
-    async senderBot(id) {
+    async senderUser(id) {
         if (id === undefined)
             return undefined;
         const cached = this.users.get(String(id));
         if (cached !== undefined)
             return cached;
-        const user = z
-            .object({ type: Authorization })
-            .safeParse(await this.call({ '@type': 'getUser', user_id: id }, 'session_lost'));
+        const user = UserFields.safeParse(await this.call({ '@type': 'getUser', user_id: id }, 'session_lost'));
         if (!user.success)
             throw new TelegramAccountError('Sender user type unavailable', 'session_lost');
-        const kind = user.data.type['@type'];
-        if (kind === 'userTypeUnknown')
+        if (user.data.type['@type'] === 'userTypeUnknown')
             throw new TelegramAccountError('Sender user type unavailable', 'session_lost');
-        const isBot = kind === 'userTypeBot';
-        this.users.set(String(id), isBot);
-        return isBot;
+        const known = knownUser(user.data);
+        this.users.set(String(id), known);
+        return known;
     }
     async publishMessage(raw, chatId) {
         const chatType = await this.chatType(chatId);
@@ -294,8 +300,8 @@ class AccountClient {
     }
     async parseMessage(raw, chatType) {
         const mentions = await this.resolveMentions(raw);
-        const userIsBot = await this.senderBot(SenderUser.safeParse(raw).data?.sender_id.user_id);
-        return parseAccountMessage(raw, chatType, mentions, userIsBot);
+        const user = await this.senderUser(SenderUser.safeParse(raw).data?.sender_id.user_id);
+        return parseAccountMessage(raw, chatType, mentions, user?.isBot, user?.name);
     }
     async resolveMentions(raw) {
         const result = new Map();
@@ -634,11 +640,21 @@ class AccountClient {
                 await rm(stage, { recursive: true, force: true });
         }
     }
+    async formattedText(text, mode) {
+        const parse_mode = mode === 'html' ? { '@type': 'textParseModeHTML' } : { '@type': 'textParseModeMarkdown', version: 2 };
+        const parsed = Caption.safeParse(await this.call({ '@type': 'parseTextEntities', text, parse_mode }, 'invalid_formatting'));
+        if (!parsed.success)
+            throw new TelegramAccountError('TDLib returned no formatted text', 'invalid_formatting');
+        return parsed.data;
+    }
     async sendPrepared(chatId, content, topic_id, stagedPath) {
         if (!this.ready || this.terminal)
             throw new TelegramAccountError('Account is not ready', 'not_sent');
         const reply_to = content.replyTo ? { '@type': 'inputMessageReplyToMessage', message_id: content.replyTo } : null;
-        const input_message_content = inputContent(content, stagedPath);
+        const formatted = content.kind === 'text' && content.parseMode
+            ? await this.formattedText(content.text, content.parseMode)
+            : undefined;
+        const input_message_content = inputContent(content, stagedPath, formatted);
         let reply;
         try {
             reply = await this.call({ '@type': 'sendMessage', chat_id: chatId, reply_to, topic_id, input_message_content }, 'unknown');
