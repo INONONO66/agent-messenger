@@ -85,7 +85,7 @@ const NATIVE_CLOSING = new Set([
 
 const SenderUser = z.object({ sender_id: z.object({ '@type': z.literal('messageSenderUser'), user_id: Id }) })
 const InputFile = z.object({ '@type': z.literal('inputFileLocal'), path: z.string() })
-const Caption = z.object({ '@type': z.literal('formattedText'), text: z.string(), entities: z.array(z.never()) })
+const Caption = z.object({ '@type': z.literal('formattedText'), text: z.string(), entities: z.array(z.unknown()) })
 const InputMessageContent = z.discriminatedUnion('@type', [
   z.object({ '@type': z.literal('inputMessageText'), text: Caption }),
   z.object({ '@type': z.literal('inputMessagePhoto'), photo: InputFile, caption: Caption }),
@@ -107,8 +107,12 @@ function stagedFilename(name: string): string {
   return segment && segment !== '.' && segment !== '..' ? segment : 'upload'
 }
 
-function inputContent(content: TelegramSendContent, stagedPath?: string): z.infer<typeof InputMessageContent> {
-  const caption = {
+function inputContent(
+  content: TelegramSendContent,
+  stagedPath?: string,
+  formatted?: z.infer<typeof Caption>,
+): z.infer<typeof InputMessageContent> {
+  const caption = formatted ?? {
     '@type': 'formattedText' as const,
     text: content.kind === 'text' ? content.text : (content.caption ?? ''),
     entities: [],
@@ -672,6 +676,15 @@ class AccountClient implements TelegramAccountClient {
     }
   }
 
+  private async markdownText(text: string): Promise<z.infer<typeof Caption>> {
+    const parse_mode = { '@type': 'textParseModeMarkdown', version: 2 }
+    const parsed = Caption.safeParse(
+      await this.call({ '@type': 'parseTextEntities', text, parse_mode }, 'invalid_markdown'),
+    )
+    if (!parsed.success) throw new TelegramAccountError('TDLib returned no formatted text', 'invalid_markdown')
+    return parsed.data
+  }
+
   private async sendPrepared(
     chatId: string,
     content: TelegramSendContent,
@@ -680,7 +693,8 @@ class AccountClient implements TelegramAccountClient {
   ): Promise<{ readonly messageId: string; readonly botMessageId?: string }> {
     if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'not_sent')
     const reply_to = content.replyTo ? { '@type': 'inputMessageReplyToMessage', message_id: content.replyTo } : null
-    const input_message_content = inputContent(content, stagedPath)
+    const formatted = content.kind === 'text' && content.markdown ? await this.markdownText(content.text) : undefined
+    const input_message_content = inputContent(content, stagedPath, formatted)
     let reply: TdEvent
     try {
       reply = await this.call(

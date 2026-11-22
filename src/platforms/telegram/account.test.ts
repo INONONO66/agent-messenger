@@ -882,6 +882,45 @@ describe('history, sends and downloads', () => {
     expect(await readdir(input.filesDir)).toEqual([])
   })
 
+  it('sends markdown as TDLib-parsed formatting and refuses markdown TDLib cannot parse', async () => {
+    const { client, fake } = await started()
+    const entities = [{ '@type': 'textEntity', offset: 0, length: 4, type: { '@type': 'textEntityTypeBold' } }]
+    const texts: unknown[] = []
+    let sequence = 0
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'parseTextEntities') {
+        if (request.text === 'bad*') fake.reply(id, request, { '@type': 'error', code: 400, message: 'unclosed' })
+        else fake.reply(id, request, { '@type': 'formattedText', text: 'bold', entities })
+        return
+      }
+      if (request['@type'] !== 'sendMessage') return
+      texts.push(request.input_message_content.text)
+      const temp = ++sequence
+      fake.emit(id, {
+        '@type': 'updateMessageSendSucceeded',
+        old_message_id: temp,
+        message: { id: temp + 100, chat_id: 33 },
+      })
+      fake.reply(id, request, { '@type': 'message', id: temp })
+    }
+    await client.send('33', { kind: 'text', text: '*bold*', markdown: true })
+    const refused = await client.send('33', { kind: 'text', text: 'bad*', markdown: true }).catch((error) => error)
+    await client.send('33', { kind: 'text', text: 'plain *as is*' })
+    expect(texts).toEqual([
+      { '@type': 'formattedText', text: 'bold', entities },
+      { '@type': 'formattedText', text: 'plain *as is*', entities: [] },
+    ])
+    expect((refused as { code?: string }).code).toBe('invalid_markdown')
+    expect(
+      fake.sent
+        .filter(({ request }) => request['@type'] === 'parseTextEntities')
+        .map(({ request }) => request.parse_mode),
+    ).toEqual([
+      { '@type': 'textParseModeMarkdown', version: 2 },
+      { '@type': 'textParseModeMarkdown', version: 2 },
+    ])
+  })
+
   it('stages each media byte kind privately and removes staging after confirmation', async () => {
     const { client, fake, input } = await started()
     const confirmed = confirmSends(fake, (request) => {
