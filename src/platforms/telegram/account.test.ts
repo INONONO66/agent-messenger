@@ -678,6 +678,47 @@ describe('message parsing', () => {
     expect((await published).mentionedUserIds).toEqual(['88'])
     expect(fake.sent.find(({ request }) => request['@type'] === 'searchPublicChat')?.request.username).toBe('known')
   })
+
+  it('names a user sender from user updates and from getUser', async () => {
+    const { client, fake } = await started()
+    const previous = fake.onSend
+    fake.onSend = (id, request) => {
+      if (request['@type'] !== 'getUser') return previous(id, request)
+      fake.reply(id, request, {
+        '@type': 'user',
+        id: 44,
+        type: { '@type': 'userTypeRegular' },
+        first_name: 'Dana',
+        last_name: '',
+      })
+    }
+    const senders: unknown[] = []
+    const published = new Promise<void>((resolve) =>
+      client.onMessage((entry) => {
+        senders.push(entry.sender)
+        if (senders.length === 2) resolve()
+      }),
+    )
+    fake.emit(1, {
+      '@type': 'updateUser',
+      user: { id: 27, type: { '@type': 'userTypeRegular' }, first_name: 'Ino', last_name: 'Kim' },
+    })
+    fake.emit(1, { '@type': 'updateNewChat', chat: { id: 33, type: { '@type': 'chatTypeBasicGroup' } } })
+    fake.emit(1, {
+      '@type': 'updateNewMessage',
+      message: message({ '@type': 'messageText', text: { text: 'one', entities: [] } }),
+    })
+    fake.emit(1, {
+      '@type': 'updateNewMessage',
+      message: {
+        ...message({ '@type': 'messageText', text: { text: 'two', entities: [] } }, 21),
+        sender_id: { '@type': 'messageSenderUser', user_id: 44 },
+      },
+    })
+    await published
+    expect(senders).toContainEqual({ kind: 'user', id: '27', isBot: false, name: 'Ino Kim' })
+    expect(senders).toContainEqual({ kind: 'user', id: '44', isBot: false, name: 'Dana' })
+  })
 })
 
 describe('history, sends and downloads', () => {
@@ -839,6 +880,44 @@ describe('history, sends and downloads', () => {
     ).rejects.toMatchObject({ code: 'media_too_large' })
     expect(fake.sent).toHaveLength(sends)
     expect(await readdir(input.filesDir)).toEqual([])
+  })
+
+  it('sends HTML or MarkdownV2 as TDLib-parsed formatting and refuses markup TDLib cannot parse', async () => {
+    const { client, fake } = await started()
+    const entities = [{ '@type': 'textEntity', offset: 0, length: 4, type: { '@type': 'textEntityTypeBold' } }]
+    const texts: unknown[] = []
+    let sequence = 0
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'parseTextEntities') {
+        if (request.text === 'bad*') fake.reply(id, request, { '@type': 'error', code: 400, message: 'unclosed' })
+        else fake.reply(id, request, { '@type': 'formattedText', text: 'bold', entities })
+        return
+      }
+      if (request['@type'] !== 'sendMessage') return
+      texts.push(request.input_message_content.text)
+      const temp = ++sequence
+      fake.emit(id, {
+        '@type': 'updateMessageSendSucceeded',
+        old_message_id: temp,
+        message: { id: temp + 100, chat_id: 33 },
+      })
+      fake.reply(id, request, { '@type': 'message', id: temp })
+    }
+    await client.send('33', { kind: 'text', text: '<b>bold</b>', parseMode: 'html' })
+    const refused = await client
+      .send('33', { kind: 'text', text: 'bad*', parseMode: 'markdownv2' })
+      .catch((error) => error)
+    await client.send('33', { kind: 'text', text: 'plain *as is*' })
+    expect(texts).toEqual([
+      { '@type': 'formattedText', text: 'bold', entities },
+      { '@type': 'formattedText', text: 'plain *as is*', entities: [] },
+    ])
+    expect((refused as { code?: string }).code).toBe('invalid_formatting')
+    expect(
+      fake.sent
+        .filter(({ request }) => request['@type'] === 'parseTextEntities')
+        .map(({ request }) => request.parse_mode),
+    ).toEqual([{ '@type': 'textParseModeHTML' }, { '@type': 'textParseModeMarkdown', version: 2 }])
   })
 
   it('stages each media byte kind privately and removes staging after confirmation', async () => {
