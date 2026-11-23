@@ -2,6 +2,7 @@ import { WebClient } from '@slack/web-api';
 import { z } from 'zod';
 import { checkDownloadSize, downloadRequest, readDownload } from '../../shared/download.js';
 import { mapSlackListItem, } from '../slack-api-types.js';
+import { mapBookmark } from '../slack/client-mappers.js';
 import { SlackBotCredentialManager } from './credential-manager.js';
 import { mapSlackFile, mapSlackMessage } from './message-mapper.js';
 import { SlackBotError, SlackFileSchema, } from './types.js';
@@ -267,6 +268,34 @@ export class SlackBotClient {
                 name: normalizedEmoji,
             });
             this.checkResponse(response);
+        });
+    }
+    async addBookmark(channel, title, link) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('bookmarks.add', {
+                channel_id: channel,
+                title,
+                link,
+                type: 'link',
+            });
+            this.checkResponse(response);
+            return mapBookmark(response.bookmark, { channel_id: channel, title, link, type: 'link' });
+        });
+    }
+    async removeBookmark(channel, bookmarkId) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('bookmarks.remove', {
+                channel_id: channel,
+                bookmark_id: bookmarkId,
+            });
+            this.checkResponse(response);
+        });
+    }
+    async listBookmarks(channel) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('bookmarks.list', { channel_id: channel });
+            this.checkResponse(response);
+            return (response.bookmarks || []).map((bookmark) => mapBookmark(bookmark, { channel_id: channel, type: 'link' }));
         });
     }
     async listChannels(options) {

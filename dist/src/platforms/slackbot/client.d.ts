@@ -1,5 +1,6 @@
 import { type DownloadOptions } from '../../shared/download.js';
 import { type SlackCanvasChange, type SlackListCell, type SlackListCreateOptions, type SlackListFieldInput, type SlackListItem, type SlackListPage } from '../slack-api-types.js';
+import type { SlackBookmark } from '../slack/types.js';
 import { type SlackChannel, type SlackFile, type SlackMessage, type SlackUser } from './types.js';
 export declare class SlackBotClient {
     private client;
@@ -62,6 +63,9 @@ export declare class SlackBotClient {
     getMessage(channel: string, ts: string): Promise<SlackMessage | null>;
     addReaction(channel: string, timestamp: string, emoji: string): Promise<void>;
     removeReaction(channel: string, timestamp: string, emoji: string): Promise<void>;
+    addBookmark(channel: string, title: string, link: string): Promise<SlackBookmark>;
+    removeBookmark(channel: string, bookmarkId: string): Promise<void>;
+    listBookmarks(channel: string): Promise<SlackBookmark[]>;
     listChannels(options?: {
         limit?: number;
         cursor?: string;

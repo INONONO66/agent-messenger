@@ -650,6 +650,24 @@ class AccountClient {
     async markRead(chatId, messageIds) {
         await this.call({ '@type': 'viewMessages', chat_id: chatId, message_ids: messageIds, source: null, force_read: true }, 'action_failed', undefined, true);
     }
+    async react(chatId, messageId, emoji) {
+        await this.call({
+            '@type': 'addMessageReaction',
+            chat_id: chatId,
+            message_id: messageId,
+            reaction_type: { '@type': 'reactionTypeEmoji', emoji },
+            is_big: false,
+            update_recent_reactions: true,
+        }, 'action_failed', undefined, true);
+    }
+    async unreact(chatId, messageId, emoji) {
+        await this.call({
+            '@type': 'removeMessageReaction',
+            chat_id: chatId,
+            message_id: messageId,
+            reaction_type: { '@type': 'reactionTypeEmoji', emoji },
+        }, 'action_failed', undefined, true);
+    }
     async pin(chatId, messageId, options) {
         await this.call({
             '@type': 'pinChatMessage',

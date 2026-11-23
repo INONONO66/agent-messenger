@@ -126,6 +126,8 @@ export declare class SlackClient {
     editBookmark(channel: string, bookmarkId: string, options: Partial<Pick<SlackBookmark, 'title' | 'link' | 'emoji'>>): Promise<SlackBookmark>;
     removeBookmark(channel: string, bookmarkId: string): Promise<void>;
     listBookmarks(channel: string): Promise<SlackBookmark[]>;
+    snoozeDnd(minutes: number): Promise<void>;
+    endDnd(): Promise<void>;
     scheduleMessage(channel: string, text: string, postAt: number, threadTs?: string): Promise<SlackScheduledMessage>;
     listScheduledMessages(channel?: string): Promise<SlackScheduledMessage[]>;
     deleteScheduledMessage(channel: string, scheduledMessageId: string): Promise<void>;

@@ -603,6 +603,18 @@ export class SlackClient {
             return (response.bookmarks || []).map((bookmark) => mapBookmark(bookmark, { channel_id: channel, type: 'link' }));
         });
     }
+    async snoozeDnd(minutes) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('dnd.setSnooze', { num_minutes: minutes });
+            this.checkResponse(response);
+        });
+    }
+    async endDnd() {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('dnd.endSnooze');
+            this.checkResponse(response);
+        });
+    }
     async scheduleMessage(channel, text, postAt, threadTs) {
         return this.withRetry(async () => {
             const response = await this.ensureAuth().chat.scheduleMessage({

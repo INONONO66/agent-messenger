@@ -109,6 +109,8 @@ export interface TelegramAccountClient {
         readonly botMessageId?: string;
     }>;
     markRead(chatId: string, messageIds: readonly string[]): Promise<void>;
+    react(chatId: string, messageId: string, emoji: string): Promise<void>;
+    unreact(chatId: string, messageId: string, emoji: string): Promise<void>;
     pin(chatId: string, messageId: string, options?: {
         readonly silent?: boolean;
     }): Promise<void>;

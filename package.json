@@ -44,137 +44,137 @@
   "typesVersions": {
     "*": {
       "slack": [
-        "./dist/src/platforms/slack/index.d.d.d.ts"
+        "./dist/src/platforms/slack/index.d.d.d.d.ts"
       ],
       "slackbot": [
-        "./dist/src/platforms/slackbot/index.d.d.d.ts"
+        "./dist/src/platforms/slackbot/index.d.d.d.d.ts"
       ],
       "discord": [
-        "./dist/src/platforms/discord/index.d.d.d.ts"
+        "./dist/src/platforms/discord/index.d.d.d.d.ts"
       ],
       "discordbot": [
-        "./dist/src/platforms/discordbot/index.d.d.d.ts"
+        "./dist/src/platforms/discordbot/index.d.d.d.d.ts"
       ],
       "teams": [
-        "./dist/src/platforms/teams/index.d.d.d.ts"
+        "./dist/src/platforms/teams/index.d.d.d.d.ts"
       ],
       "webex": [
-        "./dist/src/platforms/webex/index.d.d.d.ts"
+        "./dist/src/platforms/webex/index.d.d.d.d.ts"
       ],
       "webexbot": [
-        "./dist/src/platforms/webexbot/index.d.d.d.ts"
+        "./dist/src/platforms/webexbot/index.d.d.d.d.ts"
       ],
       "whatsapp": [
-        "./dist/src/platforms/whatsapp/index.d.d.d.ts"
+        "./dist/src/platforms/whatsapp/index.d.d.d.d.ts"
       ],
       "whatsappbot": [
-        "./dist/src/platforms/whatsappbot/index.d.d.d.ts"
+        "./dist/src/platforms/whatsappbot/index.d.d.d.d.ts"
       ],
       "line": [
-        "./dist/src/platforms/line/index.d.d.d.ts"
+        "./dist/src/platforms/line/index.d.d.d.d.ts"
       ],
       "wechatbot": [
-        "./dist/src/platforms/wechatbot/index.d.d.d.ts"
+        "./dist/src/platforms/wechatbot/index.d.d.d.d.ts"
       ],
       "imessage": [
-        "./dist/src/platforms/imessage/index.d.d.d.ts"
+        "./dist/src/platforms/imessage/index.d.d.d.d.ts"
       ],
       "instagram": [
-        "./dist/src/platforms/instagram/index.d.d.d.ts"
+        "./dist/src/platforms/instagram/index.d.d.d.d.ts"
       ],
       "kakaotalk": [
-        "./dist/src/platforms/kakaotalk/index.d.d.d.ts"
+        "./dist/src/platforms/kakaotalk/index.d.d.d.d.ts"
       ],
       "channeltalk": [
-        "./dist/src/platforms/channeltalk/index.d.d.d.ts"
+        "./dist/src/platforms/channeltalk/index.d.d.d.d.ts"
       ],
       "channeltalkbot": [
-        "./dist/src/platforms/channeltalkbot/index.d.d.d.ts"
+        "./dist/src/platforms/channeltalkbot/index.d.d.d.d.ts"
       ],
       "telegrambot": [
-        "./dist/src/platforms/telegrambot/index.d.d.d.ts"
+        "./dist/src/platforms/telegrambot/index.d.d.d.d.ts"
       ],
       "telegram": [
-        "./dist/src/platforms/telegram/index.d.d.d.ts"
+        "./dist/src/platforms/telegram/index.d.d.d.d.ts"
       ]
     }
   },
   "exports": {
     "./package.json": "./package.json",
     ".": {
-      "types": "./dist/src/cli.d.d.d.ts",
+      "types": "./dist/src/cli.d.d.d.d.ts",
       "default": "./dist/src/cli.js"
     },
     "./slack": {
-      "types": "./dist/src/platforms/slack/index.d.d.d.ts",
+      "types": "./dist/src/platforms/slack/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/slack/index.js"
     },
     "./slackbot": {
-      "types": "./dist/src/platforms/slackbot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/slackbot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/slackbot/index.js"
     },
     "./discord": {
-      "types": "./dist/src/platforms/discord/index.d.d.d.ts",
+      "types": "./dist/src/platforms/discord/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/discord/index.js"
     },
     "./discordbot": {
-      "types": "./dist/src/platforms/discordbot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/discordbot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/discordbot/index.js"
     },
     "./teams": {
-      "types": "./dist/src/platforms/teams/index.d.d.d.ts",
+      "types": "./dist/src/platforms/teams/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/teams/index.js"
     },
     "./webex": {
-      "types": "./dist/src/platforms/webex/index.d.d.d.ts",
+      "types": "./dist/src/platforms/webex/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/webex/index.js"
     },
     "./webexbot": {
-      "types": "./dist/src/platforms/webexbot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/webexbot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/webexbot/index.js"
     },
     "./whatsapp": {
-      "types": "./dist/src/platforms/whatsapp/index.d.d.d.ts",
+      "types": "./dist/src/platforms/whatsapp/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/whatsapp/index.js"
     },
     "./whatsappbot": {
-      "types": "./dist/src/platforms/whatsappbot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/whatsappbot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/whatsappbot/index.js"
     },
     "./line": {
-      "types": "./dist/src/platforms/line/index.d.d.d.ts",
+      "types": "./dist/src/platforms/line/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/line/index.js"
     },
     "./wechatbot": {
-      "types": "./dist/src/platforms/wechatbot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/wechatbot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/wechatbot/index.js"
     },
     "./imessage": {
-      "types": "./dist/src/platforms/imessage/index.d.d.d.ts",
+      "types": "./dist/src/platforms/imessage/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/imessage/index.js"
     },
     "./instagram": {
-      "types": "./dist/src/platforms/instagram/index.d.d.d.ts",
+      "types": "./dist/src/platforms/instagram/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/instagram/index.js"
     },
     "./kakaotalk": {
-      "types": "./dist/src/platforms/kakaotalk/index.d.d.d.ts",
+      "types": "./dist/src/platforms/kakaotalk/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/kakaotalk/index.js"
     },
     "./channeltalk": {
-      "types": "./dist/src/platforms/channeltalk/index.d.d.d.ts",
+      "types": "./dist/src/platforms/channeltalk/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/channeltalk/index.js"
     },
     "./channeltalkbot": {
-      "types": "./dist/src/platforms/channeltalkbot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/channeltalkbot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/channeltalkbot/index.js"
     },
     "./telegrambot": {
-      "types": "./dist/src/platforms/telegrambot/index.d.d.d.ts",
+      "types": "./dist/src/platforms/telegrambot/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/telegrambot/index.js"
     },
     "./telegram": {
-      "types": "./dist/src/platforms/telegram/index.d.d.d.ts",
+      "types": "./dist/src/platforms/telegram/index.d.d.d.d.ts",
       "default": "./dist/src/platforms/telegram/index.js"
     }
   },
