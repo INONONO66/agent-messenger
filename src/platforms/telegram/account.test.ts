@@ -1188,11 +1188,13 @@ describe('history, sends and downloads', () => {
     )
   })
 
-  it('sends exact read, pin, edit, delete, draft, unread, and typing requests', async () => {
+  it('sends exact reaction, read, pin, edit, delete, draft, unread, and typing requests', async () => {
     const { client, fake } = await started()
     fake.onSend = (id, request) => fake.reply(id, request, { '@type': 'ok' })
 
     await client.markRead('33', ['10', '11'])
+    await client.react('33', '10', '👍')
+    await client.unreact('33', '10', '👍')
     await client.pin('33', '10', { silent: true })
     await client.unpin('33', '10')
     await client.edit('33', '10', 'updated')
@@ -1202,8 +1204,22 @@ describe('history, sends and downloads', () => {
     await client.markUnread('33', true)
     await client.typing('33', 'forum:7')
 
-    expect(fake.sent.slice(-9).map(({ request: { '@extra': _extra, ...request } }) => request)).toEqual([
+    expect(fake.sent.slice(-11).map(({ request: { '@extra': _extra, ...request } }) => request)).toEqual([
       { '@type': 'viewMessages', chat_id: '33', message_ids: ['10', '11'], source: null, force_read: true },
+      {
+        '@type': 'addMessageReaction',
+        chat_id: '33',
+        message_id: '10',
+        reaction_type: { '@type': 'reactionTypeEmoji', emoji: '👍' },
+        is_big: false,
+        update_recent_reactions: true,
+      },
+      {
+        '@type': 'removeMessageReaction',
+        chat_id: '33',
+        message_id: '10',
+        reaction_type: { '@type': 'reactionTypeEmoji', emoji: '👍' },
+      },
       {
         '@type': 'pinChatMessage',
         chat_id: '33',

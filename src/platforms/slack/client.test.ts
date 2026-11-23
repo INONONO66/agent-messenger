@@ -1533,6 +1533,7 @@ describe('SlackClient extended methods', () => {
           })
         if (method === 'bookmarks.remove') return Promise.resolve({ ok: true })
         if (method === 'bookmarks.list') return Promise.resolve({ ok: true, bookmarks: [] })
+        if (method === 'dnd.setSnooze' || method === 'dnd.endSnooze') return Promise.resolve({ ok: true })
         if (method === 'usergroups.list')
           return Promise.resolve({
             ok: true,
@@ -2082,6 +2083,17 @@ describe('SlackClient extended methods', () => {
       const { client, mock } = await makeClient()
       mock.apiCall.mockResolvedValue({ ok: false, error: 'channel_not_found' })
       await expect(client.listBookmarks('C001')).rejects.toThrow(SlackError)
+    })
+  })
+
+  describe('dnd', () => {
+    it('sends exact snooze and end requests', async () => {
+      const { client, mock } = await makeClient()
+
+      await client.snoozeDnd(45)
+      await client.endDnd()
+
+      expect(mock.apiCall.mock.calls.slice(-2)).toEqual([['dnd.setSnooze', { num_minutes: 45 }], ['dnd.endSnooze']])
     })
   })
 
