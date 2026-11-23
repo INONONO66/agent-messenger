@@ -51,6 +51,7 @@ const mockConversations = {
       messages: [{ ts: '1234567890.123456', text: 'Hello', type: 'message', user: 'U123' }],
     }),
   ),
+  mark: mock(() => Promise.resolve({ ok: true })),
 }
 const mockChat = {
   postMessage: mock(() =>
@@ -58,6 +59,14 @@ const mockChat = {
       ok: true,
       ts: '1234567890.123456',
       message: { text: 'Hello', type: 'message' },
+    }),
+  ),
+  scheduleMessage: mock(() =>
+    Promise.resolve({
+      ok: true,
+      scheduled_message_id: 'SM123',
+      channel: 'C123',
+      post_at: 1700000000,
     }),
   ),
 }
@@ -70,6 +79,27 @@ const mockAssistant = {
     setStatus: mock(() => Promise.resolve({ ok: true })),
   },
 }
+const mockPins = {
+  add: mock(() => Promise.resolve({ ok: true })),
+  remove: mock(() => Promise.resolve({ ok: true })),
+}
+const mockApiCall = mock((method: string) => {
+  if (method === 'slackLists.items.list')
+    return Promise.resolve({
+      ok: true,
+      items: [{ id: 'Rec1', list_id: 'F1', fields: [{ key: 'title', column_id: 'Col1', text: 'Task' }] }],
+      response_metadata: { next_cursor: 'next' },
+    })
+  if (method === 'slackLists.items.create')
+    return Promise.resolve({
+      ok: true,
+      item: { id: 'Rec2', list_id: 'F1', fields: [{ key: 'title', column_id: 'Col1', text: 'New' }] },
+    })
+  if (method === 'slackLists.create') return Promise.resolve({ ok: true, list_id: 'F1' })
+  if (method === 'canvases.create' || method === 'conversations.canvases.create')
+    return Promise.resolve({ ok: true, canvas_id: 'Canvas1' })
+  return Promise.resolve({ ok: true })
+})
 const mockFiles = {
   uploadV2: mock(() =>
     Promise.resolve({
@@ -171,6 +201,8 @@ mock.module('@slack/web-api', () => ({
     users = mockUsers
     files = mockFiles
     assistant = mockAssistant
+    pins = mockPins
+    apiCall = mockApiCall
   },
 }))
 
@@ -181,7 +213,9 @@ describe('SlackBotClient', () => {
     mockConversations.list.mockClear()
     mockConversations.info.mockClear()
     mockConversations.history.mockClear()
+    mockConversations.mark.mockClear()
     mockChat.postMessage.mockClear()
+    mockChat.scheduleMessage.mockClear()
     mockReactions.add.mockClear()
     mockReactions.remove.mockClear()
     mockUsers.list.mockClear()
@@ -191,6 +225,9 @@ describe('SlackBotClient', () => {
     mockFiles.info.mockClear()
     mockFiles.delete.mockClear()
     mockAssistant.threads.setStatus.mockClear()
+    mockPins.add.mockClear()
+    mockPins.remove.mockClear()
+    mockApiCall.mockClear()
   })
 
   describe('login', () => {
@@ -672,12 +709,15 @@ describe('SlackBotClient', () => {
       // given
       const originalFetch = globalThis.fetch
       let capturedAuthHeader: string | null = null
-      globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
-        capturedAuthHeader = new Headers(init?.headers).get('Authorization')
-        if (String(url).startsWith('https://slack.com/api/files.info'))
-          return Response.json(await mockFiles.info({ file: 'F123' }))
-        return new Response(Buffer.from('downloaded content'), { status: 200 })
-      }, { preconnect: originalFetch.preconnect })
+      globalThis.fetch = Object.assign(
+        async (url: string | URL | Request, init?: RequestInit) => {
+          capturedAuthHeader = new Headers(init?.headers).get('Authorization')
+          if (String(url).startsWith('https://slack.com/api/files.info'))
+            return Response.json(await mockFiles.info({ file: 'F123' }))
+          return new Response(Buffer.from('downloaded content'), { status: 200 })
+        },
+        { preconnect: originalFetch.preconnect },
+      )
 
       try {
         const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })
@@ -729,6 +769,112 @@ describe('SlackBotClient', () => {
 
       // when/then
       await expect(client.deleteFile('F123')).rejects.toThrow(SlackBotError)
+    })
+  })
+
+  describe('message actions', () => {
+    it('sends exact pin, schedule, and mark requests', async () => {
+      const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })
+      const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: 'Later' } }]
+
+      await client.pinMessage('C123', '123.456')
+      await client.unpinMessage('C123', '123.456')
+      const scheduled = await client.scheduleMessage('C123', 'Later', 1700000000, '100.200', { blocks })
+      await client.markRead('C123', '123.456')
+
+      expect(mockPins.add).toHaveBeenCalledWith({ channel: 'C123', timestamp: '123.456' })
+      expect(mockPins.remove).toHaveBeenCalledWith({ channel: 'C123', timestamp: '123.456' })
+      expect(mockChat.scheduleMessage).toHaveBeenCalledWith({
+        channel: 'C123',
+        text: 'Later',
+        post_at: 1700000000,
+        thread_ts: '100.200',
+        blocks,
+      })
+      expect(scheduled).toEqual({ scheduledMessageId: 'SM123', channelId: 'C123', postAt: 1700000000 })
+      expect(mockConversations.mark).toHaveBeenCalledWith({ channel: 'C123', ts: '123.456' })
+    })
+
+    it('surfaces a typed SlackBotError refusal', async () => {
+      mockPins.add.mockResolvedValueOnce({ ok: false, error: 'not_pinnable' })
+      const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })
+
+      await expect(client.pinMessage('C123', '123.456')).rejects.toMatchObject({
+        name: 'SlackBotError',
+        code: 'not_pinnable',
+      })
+    })
+  })
+
+  describe('Lists and Canvas actions', () => {
+    it('sends exact Slack Lists requests and maps compact results', async () => {
+      const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })
+      const richText = [{ type: 'rich_text', elements: [] }]
+      const field = { column_id: 'Col1', rich_text: richText }
+      const cell = { row_id: 'Rec1', ...field }
+
+      const page = await client.listListItems('F1', { limit: 10, cursor: 'cursor' })
+      const item = await client.createListItem('F1', [field])
+      await client.updateListItems('F1', [cell])
+      await client.deleteListItem('F1', 'Rec1')
+      const list = await client.createList('Tasks', { todoMode: true })
+
+      expect(page).toEqual({
+        items: [{ id: 'Rec1', listId: 'F1', fields: [{ key: 'title', columnId: 'Col1', text: 'Task' }] }],
+        nextCursor: 'next',
+      })
+      expect(item.id).toBe('Rec2')
+      expect(list).toEqual({ listId: 'F1' })
+      expect(mockApiCall).toHaveBeenNthCalledWith(1, 'slackLists.items.list', {
+        list_id: 'F1',
+        limit: 10,
+        cursor: 'cursor',
+      })
+      expect(mockApiCall).toHaveBeenNthCalledWith(2, 'slackLists.items.create', {
+        list_id: 'F1',
+        initial_fields: [field],
+      })
+      expect(mockApiCall).toHaveBeenNthCalledWith(3, 'slackLists.items.update', { list_id: 'F1', cells: [cell] })
+      expect(mockApiCall).toHaveBeenNthCalledWith(4, 'slackLists.items.delete', { list_id: 'F1', id: 'Rec1' })
+      expect(mockApiCall).toHaveBeenNthCalledWith(5, 'slackLists.create', {
+        name: 'Tasks',
+        description_blocks: undefined,
+        schema: undefined,
+        copy_from_list_id: undefined,
+        include_copied_list_records: undefined,
+        todo_mode: true,
+      })
+    })
+
+    it('sends exact Canvas requests and surfaces typed refusals', async () => {
+      const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })
+      const changes = [
+        {
+          operation: 'insert_at_end' as const,
+          document_content: { type: 'markdown' as const, markdown: 'More' },
+        },
+      ]
+
+      expect(await client.createCanvas('Plan', '# Plan', { channelId: 'C123' })).toEqual({ canvasId: 'Canvas1' })
+      await client.editCanvas('Canvas1', changes)
+      expect(await client.createChannelCanvas('C123', '# Home', 'Home')).toEqual({ canvasId: 'Canvas1' })
+      expect(mockApiCall).toHaveBeenNthCalledWith(1, 'canvases.create', {
+        title: 'Plan',
+        document_content: { type: 'markdown', markdown: '# Plan' },
+        channel_id: 'C123',
+      })
+      expect(mockApiCall).toHaveBeenNthCalledWith(2, 'canvases.edit', { canvas_id: 'Canvas1', changes })
+      expect(mockApiCall).toHaveBeenNthCalledWith(3, 'conversations.canvases.create', {
+        channel_id: 'C123',
+        document_content: { type: 'markdown', markdown: '# Home' },
+        title: 'Home',
+      })
+
+      mockApiCall.mockResolvedValueOnce({ ok: false, error: 'canvas_not_found' })
+      await expect(client.editCanvas('missing', changes)).rejects.toMatchObject({
+        name: 'SlackBotError',
+        code: 'canvas_not_found',
+      })
     })
   })
 })
