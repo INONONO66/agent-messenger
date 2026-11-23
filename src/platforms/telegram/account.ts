@@ -707,6 +707,36 @@ class AccountClient implements TelegramAccountClient {
     )
   }
 
+  async react(chatId: string, messageId: string, emoji: string): Promise<void> {
+    await this.call(
+      {
+        '@type': 'addMessageReaction',
+        chat_id: chatId,
+        message_id: messageId,
+        reaction_type: { '@type': 'reactionTypeEmoji', emoji },
+        is_big: false,
+        update_recent_reactions: true,
+      },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async unreact(chatId: string, messageId: string, emoji: string): Promise<void> {
+    await this.call(
+      {
+        '@type': 'removeMessageReaction',
+        chat_id: chatId,
+        message_id: messageId,
+        reaction_type: { '@type': 'reactionTypeEmoji', emoji },
+      },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
   async pin(chatId: string, messageId: string, options?: { readonly silent?: boolean }): Promise<void> {
     await this.call(
       {
