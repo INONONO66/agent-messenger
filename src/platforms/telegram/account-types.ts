@@ -98,6 +98,8 @@ export interface TelegramAccountClient {
     content: TelegramSendContent,
   ): Promise<{ readonly messageId: string; readonly botMessageId?: string }>
   markRead(chatId: string, messageIds: readonly string[]): Promise<void>
+  react(chatId: string, messageId: string, emoji: string): Promise<void>
+  unreact(chatId: string, messageId: string, emoji: string): Promise<void>
   pin(chatId: string, messageId: string, options?: { readonly silent?: boolean }): Promise<void>
   unpin(chatId: string, messageId: string): Promise<void>
   edit(chatId: string, messageId: string, text: string, parseMode?: 'html' | 'markdownv2'): Promise<void>

@@ -11,6 +11,8 @@ import {
   type SlackListItem,
   type SlackListPage,
 } from '../slack-api-types'
+import { mapBookmark } from '../slack/client-mappers'
+import type { SlackBookmark } from '../slack/types'
 import { SlackBotCredentialManager } from './credential-manager'
 import { mapSlackFile, mapSlackMessage } from './message-mapper'
 import {
@@ -350,6 +352,41 @@ export class SlackBotClient {
         name: normalizedEmoji,
       })
       this.checkResponse(response)
+    })
+  }
+
+  async addBookmark(channel: string, title: string, link: string): Promise<SlackBookmark> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('bookmarks.add', {
+        channel_id: channel,
+        title,
+        link,
+        type: 'link',
+      })
+      this.checkResponse(response)
+
+      return mapBookmark((response as any).bookmark, { channel_id: channel, title, link, type: 'link' })
+    })
+  }
+
+  async removeBookmark(channel: string, bookmarkId: string): Promise<void> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('bookmarks.remove', {
+        channel_id: channel,
+        bookmark_id: bookmarkId,
+      })
+      this.checkResponse(response)
+    })
+  }
+
+  async listBookmarks(channel: string): Promise<SlackBookmark[]> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('bookmarks.list', { channel_id: channel })
+      this.checkResponse(response)
+
+      return ((response as any).bookmarks || []).map((bookmark: unknown) =>
+        mapBookmark(bookmark, { channel_id: channel, type: 'link' }),
+      )
     })
   }
 

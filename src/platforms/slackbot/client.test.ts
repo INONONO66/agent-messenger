@@ -84,6 +84,36 @@ const mockPins = {
   remove: mock(() => Promise.resolve({ ok: true })),
 }
 const mockApiCall = mock((method: string) => {
+  if (method === 'bookmarks.add')
+    return Promise.resolve({
+      ok: true,
+      bookmark: {
+        id: 'Bm123',
+        channel_id: 'C123',
+        title: 'Reference',
+        link: 'https://example.com/reference',
+        type: 'link',
+        date_created: 0,
+        date_updated: 0,
+        created_by: 'U123',
+      },
+    })
+  if (method === 'bookmarks.list')
+    return Promise.resolve({
+      ok: true,
+      bookmarks: [
+        {
+          id: 'Bm123',
+          channel_id: 'C123',
+          title: 'Reference',
+          link: 'https://example.com/reference',
+          type: 'link',
+          date_created: 0,
+          date_updated: 0,
+          created_by: 'U123',
+        },
+      ],
+    })
   if (method === 'slackLists.items.list')
     return Promise.resolve({
       ok: true,
@@ -417,6 +447,32 @@ describe('SlackBotClient', () => {
       // when/then: should not throw
       await client.removeReaction('C123', '1234567890.123456', 'thumbsup')
       expect(mockReactions.remove).toHaveBeenCalled()
+    })
+  })
+
+  describe('bookmarks', () => {
+    it('sends exact add, remove, and list requests', async () => {
+      const client = await new SlackBotClient().login({ token: 'xoxb-test-token' })
+
+      const added = await client.addBookmark('C123', 'Reference', 'https://example.com/reference')
+      await client.removeBookmark('C123', 'Bm123')
+      const listed = await client.listBookmarks('C123')
+
+      expect(mockApiCall.mock.calls).toEqual([
+        [
+          'bookmarks.add',
+          {
+            channel_id: 'C123',
+            title: 'Reference',
+            link: 'https://example.com/reference',
+            type: 'link',
+          },
+        ],
+        ['bookmarks.remove', { channel_id: 'C123', bookmark_id: 'Bm123' }],
+        ['bookmarks.list', { channel_id: 'C123' }],
+      ])
+      expect(added.id).toBe('Bm123')
+      expect(listed.map(({ id }) => id)).toEqual(['Bm123'])
     })
   })
 

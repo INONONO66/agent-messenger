@@ -790,6 +790,20 @@ export class SlackClient {
     })
   }
 
+  async snoozeDnd(minutes: number): Promise<void> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('dnd.setSnooze', { num_minutes: minutes })
+      this.checkResponse(response)
+    })
+  }
+
+  async endDnd(): Promise<void> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('dnd.endSnooze')
+      this.checkResponse(response)
+    })
+  }
+
   async scheduleMessage(
     channel: string,
     text: string,
