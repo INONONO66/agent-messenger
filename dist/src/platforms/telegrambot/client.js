@@ -322,6 +322,18 @@ export class TelegramBotClient {
     async deleteMessage(chatId, messageId) {
         return this.call('deleteMessage', { chat_id: chatId, message_id: messageId });
     }
+    async pinChatMessage(chatId, messageId, options) {
+        return this.call('pinChatMessage', { chat_id: chatId, message_id: messageId, ...options });
+    }
+    async unpinChatMessage(chatId, messageId) {
+        return this.call('unpinChatMessage', {
+            chat_id: chatId,
+            ...(messageId === undefined ? {} : { message_id: messageId }),
+        });
+    }
+    async sendPoll(chatId, question, options, extra) {
+        return this.call('sendPoll', { chat_id: chatId, question, options, ...extra });
+    }
     async setMessageReaction(chatId, messageId, reaction, options) {
         return this.call('setMessageReaction', {
             chat_id: chatId,

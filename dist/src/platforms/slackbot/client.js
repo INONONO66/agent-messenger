@@ -1,9 +1,10 @@
 import { WebClient } from '@slack/web-api';
 import { z } from 'zod';
 import { checkDownloadSize, downloadRequest, readDownload } from '../../shared/download.js';
+import { mapSlackListItem, } from '../slack-api-types.js';
 import { SlackBotCredentialManager } from './credential-manager.js';
 import { mapSlackFile, mapSlackMessage } from './message-mapper.js';
-import { SlackBotError, SlackFileSchema } from './types.js';
+import { SlackBotError, SlackFileSchema, } from './types.js';
 const MAX_RETRIES = 3;
 const RATE_LIMIT_ERROR_CODE = 'slack_webapi_rate_limited_error';
 export class SlackBotClient {
@@ -99,6 +100,122 @@ export class SlackBotClient {
                 user: msg.user,
                 thread_ts: msg.thread_ts,
             };
+        });
+    }
+    async pinMessage(channel, ts) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().pins.add({ channel, timestamp: ts });
+            this.checkResponse(response);
+        });
+    }
+    async unpinMessage(channel, ts) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().pins.remove({ channel, timestamp: ts });
+            this.checkResponse(response);
+        });
+    }
+    async scheduleMessage(channel, text, postAt, threadTs, options) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().chat.scheduleMessage({
+                channel,
+                text,
+                post_at: postAt,
+                thread_ts: threadTs,
+                ...(options?.blocks ? { blocks: options.blocks } : {}),
+            });
+            this.checkResponse(response);
+            return {
+                scheduledMessageId: response.scheduled_message_id,
+                channelId: response.channel,
+                postAt: response.post_at,
+            };
+        });
+    }
+    async markRead(channel, ts) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().conversations.mark({ channel, ts });
+            this.checkResponse(response);
+        });
+    }
+    async listListItems(listId, options) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('slackLists.items.list', {
+                list_id: listId,
+                limit: options?.limit,
+                cursor: options?.cursor,
+            });
+            this.checkResponse(response);
+            const items = Array.isArray(response.items) ? response.items.map(mapSlackListItem) : [];
+            const metadata = response.response_metadata;
+            const nextCursor = metadata && typeof metadata === 'object' && 'next_cursor' in metadata ? metadata.next_cursor : undefined;
+            return {
+                items,
+                ...(typeof nextCursor === 'string' && nextCursor !== '' ? { nextCursor } : {}),
+            };
+        });
+    }
+    async createListItem(listId, initialFields) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('slackLists.items.create', {
+                list_id: listId,
+                initial_fields: initialFields,
+            });
+            this.checkResponse(response);
+            return mapSlackListItem(response.item);
+        });
+    }
+    async updateListItems(listId, cells) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('slackLists.items.update', { list_id: listId, cells });
+            this.checkResponse(response);
+        });
+    }
+    async deleteListItem(listId, itemId) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('slackLists.items.delete', { list_id: listId, id: itemId });
+            this.checkResponse(response);
+        });
+    }
+    async createList(name, options = {}) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('slackLists.create', {
+                name,
+                description_blocks: options.descriptionBlocks,
+                schema: options.schema,
+                copy_from_list_id: options.copyFromListId,
+                include_copied_list_records: options.includeCopiedListRecords,
+                todo_mode: options.todoMode,
+            });
+            this.checkResponse(response);
+            return { listId: String(response.list_id) };
+        });
+    }
+    async createCanvas(title, markdown, options) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('canvases.create', {
+                title,
+                document_content: { type: 'markdown', markdown },
+                channel_id: options?.channelId,
+            });
+            this.checkResponse(response);
+            return { canvasId: String(response.canvas_id) };
+        });
+    }
+    async editCanvas(canvasId, changes) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('canvases.edit', { canvas_id: canvasId, changes });
+            this.checkResponse(response);
+        });
+    }
+    async createChannelCanvas(channelId, markdown, title) {
+        return this.withRetry(async () => {
+            const response = await this.ensureAuth().apiCall('conversations.canvases.create', {
+                channel_id: channelId,
+                document_content: { type: 'markdown', markdown },
+                title,
+            });
+            this.checkResponse(response);
+            return { canvasId: String(response.canvas_id) };
         });
     }
     async getConversationHistory(channel, options) {
@@ -398,7 +515,8 @@ export class SlackBotClient {
         return downloadRequest(options, async () => {
             // The Web API client's metadata call cannot cancel an in-flight request.
             const metadata = await fetch(`https://slack.com/api/files.info?file=${encodeURIComponent(fileId)}`, {
-                headers, signal: options.signal,
+                headers,
+                signal: options.signal,
             });
             if (!metadata.ok) {
                 await metadata.body?.cancel();

@@ -111,7 +111,10 @@ function confirmed(confirmation) {
         const error = z.object({ message: z.string(), code: z.number() }).safeParse(confirmation.error);
         throw new TelegramAccountError(error.success ? error.data.message : 'TDLib send failed', 'not_sent');
     }
-    const message = z.object({ id: Id }).safeParse(confirmation.message);
+    return sentMessage(confirmation.message);
+}
+function sentMessage(value) {
+    const message = z.object({ id: Id }).safeParse(value);
     if (!message.success)
         throw new TelegramAccountError('Invalid send confirmation', 'unknown');
     const bot = botMessageId(message.data.id);
@@ -364,13 +367,13 @@ class AccountClient {
         }
         return undefined;
     }
-    async call(query, code, signal) {
+    async call(query, code, signal, requestRefused = false) {
         if (!this.receiver || this.clientId === undefined)
             throw new TelegramAccountError('Client is not started', 'session_lost');
         try {
             const event = await this.receiver.request(this.clientId, query, 15000, signal);
             if (event['@type'] === 'error')
-                throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code, query['@type'] === 'sendMessage');
+                throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code, query['@type'] === 'sendMessage' || requestRefused);
             return event;
         }
         catch (error) {
@@ -522,21 +525,25 @@ class AccountClient {
             limit: options.limit,
             only_local: false,
         }, 'history_unavailable');
+        const messages = await this.parseMessagePage(chatId, result, 'history_unavailable');
+        const oldest = messages.at(-1);
+        return { messages, ...(oldest && { before: oldest.messageId }) };
+    }
+    async parseMessagePage(chatId, result, code) {
         const page = z.object({ messages: z.array(AccountMessageSchema) }).safeParse(result);
         if (!page.success)
-            throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable');
+            throw new TelegramAccountError('Malformed TDLib message page', code);
         const chatType = await this.chatType(chatId);
         const messages = [];
         for (const raw of page.data.messages) {
             const parsed = await this.parseMessage(raw, chatType);
             if (!parsed)
-                throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable');
+                throw new TelegramAccountError('Malformed TDLib message page', code);
             messages.push(parsed);
             for (const item of parsed.media)
                 this.media.set(item.fileId, item);
         }
-        const oldest = messages.at(-1);
-        return { messages, ...(oldest && { before: oldest.messageId }) };
+        return messages;
     }
     async download(fileId, options) {
         if (!this.ready || this.terminal)
@@ -640,6 +647,93 @@ class AccountClient {
                 await rm(stage, { recursive: true, force: true });
         }
     }
+    async markRead(chatId, messageIds) {
+        await this.call({ '@type': 'viewMessages', chat_id: chatId, message_ids: messageIds, source: null, force_read: true }, 'action_failed', undefined, true);
+    }
+    async pin(chatId, messageId, options) {
+        await this.call({
+            '@type': 'pinChatMessage',
+            chat_id: chatId,
+            message_id: messageId,
+            disable_notification: options?.silent ?? false,
+            only_for_self: false,
+        }, 'action_failed', undefined, true);
+    }
+    async unpin(chatId, messageId) {
+        await this.call({ '@type': 'unpinChatMessage', chat_id: chatId, message_id: messageId }, 'action_failed', undefined, true);
+    }
+    async edit(chatId, messageId, text, parseMode) {
+        const formatted = parseMode
+            ? await this.formattedText(text, parseMode)
+            : { '@type': 'formattedText', text, entities: [] };
+        await this.call({
+            '@type': 'editMessageText',
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: null,
+            input_message_content: {
+                '@type': 'inputMessageText',
+                text: formatted,
+                link_preview_options: null,
+                clear_draft: false,
+            },
+        }, 'action_failed', undefined, true);
+    }
+    async remove(chatId, messageIds, options) {
+        await this.call({ '@type': 'deleteMessages', chat_id: chatId, message_ids: messageIds, revoke: options?.revoke ?? false }, 'action_failed', undefined, true);
+    }
+    async setDraft(chatId, text) {
+        const draft_message = text === undefined
+            ? null
+            : {
+                '@type': 'draftMessage',
+                reply_to: null,
+                date: 0,
+                content: {
+                    '@type': 'draftMessageContentText',
+                    text: { '@type': 'formattedText', text, entities: [] },
+                    link_preview_options: null,
+                },
+                effect_id: 0,
+                suggested_post_info: null,
+            };
+        await this.call({ '@type': 'setChatDraftMessage', chat_id: chatId, topic_id: null, draft_message }, 'action_failed', undefined, true);
+    }
+    async search(chatId, query, limit) {
+        if (!this.ready || this.terminal)
+            throw new TelegramAccountError('Account is not ready', 'session_lost');
+        const result = await this.call({
+            '@type': 'searchChatMessages',
+            chat_id: chatId,
+            topic_id: null,
+            query,
+            sender_id: null,
+            from_message_id: 0,
+            offset: 0,
+            limit,
+            filter: null,
+        }, 'history_unavailable');
+        return this.parseMessagePage(chatId, result, 'history_unavailable');
+    }
+    async markUnread(chatId, unread) {
+        await this.call({ '@type': 'toggleChatIsMarkedAsUnread', chat_id: chatId, is_marked_as_unread: unread }, 'action_failed', undefined, true);
+    }
+    async typing(chatId, threadId) {
+        let topic_id;
+        try {
+            topic_id = sendTopic(threadId);
+        }
+        catch {
+            throw new TelegramAccountError('Invalid Telegram thread identifier', 'action_failed', true);
+        }
+        await this.call({
+            '@type': 'sendChatAction',
+            chat_id: chatId,
+            topic_id,
+            business_connection_id: '',
+            action: { '@type': 'chatActionTyping' },
+        }, 'action_failed', undefined, true);
+    }
     async formattedText(text, mode) {
         const parse_mode = mode === 'html' ? { '@type': 'textParseModeHTML' } : { '@type': 'textParseModeMarkdown', version: 2 };
         const parsed = Caption.safeParse(await this.call({ '@type': 'parseTextEntities', text, parse_mode }, 'invalid_formatting'));
@@ -655,9 +749,26 @@ class AccountClient {
             ? await this.formattedText(content.text, content.parseMode)
             : undefined;
         const input_message_content = inputContent(content, stagedPath, formatted);
+        const options = content.kind === 'text' && content.sendAt !== undefined
+            ? {
+                '@type': 'messageSendOptions',
+                scheduling_state: {
+                    '@type': 'messageSchedulingStateSendAtDate',
+                    send_date: content.sendAt,
+                    repeat_period: 0,
+                },
+            }
+            : undefined;
         let reply;
         try {
-            reply = await this.call({ '@type': 'sendMessage', chat_id: chatId, reply_to, topic_id, input_message_content }, 'unknown');
+            reply = await this.call({
+                '@type': 'sendMessage',
+                chat_id: chatId,
+                reply_to,
+                topic_id,
+                ...(options === undefined ? {} : { options }),
+                input_message_content,
+            }, 'unknown');
         }
         catch (error) {
             if (error instanceof TdDispatchError)
@@ -667,6 +778,8 @@ class AccountClient {
         const pending = z.object({ id: Id }).safeParse(reply);
         if (!pending.success)
             throw new TelegramAccountError('Missing temporary send id', 'unknown');
+        if (content.kind === 'text' && content.sendAt !== undefined)
+            return sentMessage(reply);
         if (this.terminal)
             throw new TelegramAccountError('Account closed before send confirmation', 'unknown');
         const key = sendKey(chatId, pending.data.id);

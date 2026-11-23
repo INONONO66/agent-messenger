@@ -1,3 +1,4 @@
+import { type SlackCanvasChange, type SlackListCell, type SlackListCreateOptions, type SlackListFieldInput, type SlackListItem, type SlackListPage } from '../slack-api-types.js';
 import type { SlackActivityItem, SlackBookmark, SlackChannel, SlackChannelSection, SlackDM, SlackDraft, SlackFile, SlackMessage, SlackPin, SlackReminder, SlackSavedItem, SlackScheduledMessage, SlackSearchResult, SlackThreadView, SlackUnreadCounts, SlackUser, SlackUserProfile, SlackUsergroup } from './types.js';
 export declare class SlackError extends Error {
     code: string;
@@ -174,5 +175,24 @@ export declare class SlackClient {
         includeDisabled?: boolean;
     }): Promise<string[]>;
     updateUsergroupMembers(usergroupId: string, users: string[]): Promise<SlackUsergroup>;
+    listListItems(listId: string, options?: {
+        readonly limit?: number;
+        readonly cursor?: string;
+    }): Promise<SlackListPage>;
+    createListItem(listId: string, initialFields: readonly SlackListFieldInput[]): Promise<SlackListItem>;
+    updateListItems(listId: string, cells: readonly SlackListCell[]): Promise<void>;
+    deleteListItem(listId: string, itemId: string): Promise<void>;
+    createList(name: string, options?: SlackListCreateOptions): Promise<{
+        readonly listId: string;
+    }>;
+    createCanvas(title: string, markdown: string, options?: {
+        readonly channelId?: string;
+    }): Promise<{
+        readonly canvasId: string;
+    }>;
+    editCanvas(canvasId: string, changes: readonly SlackCanvasChange[]): Promise<void>;
+    createChannelCanvas(channelId: string, markdown: string, title?: string): Promise<{
+        readonly canvasId: string;
+    }>;
 }
 //# sourceMappingURL=client.d.ts.map

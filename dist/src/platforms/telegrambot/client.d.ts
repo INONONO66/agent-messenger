@@ -159,6 +159,15 @@ export declare class TelegramBotClient {
     }): Promise<TelegramMessage>;
     editMessageText(target: EditMessageTextTarget, text: string, options?: SendMessageOptions): Promise<TelegramMessage | true>;
     deleteMessage(chatId: ChatId, messageId: number): Promise<boolean>;
+    pinChatMessage(chatId: ChatId, messageId: number, options?: {
+        readonly disable_notification?: boolean;
+    }): Promise<boolean>;
+    unpinChatMessage(chatId: ChatId, messageId?: number): Promise<boolean>;
+    sendPoll(chatId: ChatId, question: string, options: readonly string[], extra?: {
+        readonly is_anonymous?: boolean;
+        readonly allows_multiple_answers?: boolean;
+        readonly message_thread_id?: number;
+    }): Promise<TelegramMessage>;
     setMessageReaction(chatId: ChatId, messageId: number, reaction: BotReactionType[], options?: {
         is_big?: boolean;
     }): Promise<boolean>;

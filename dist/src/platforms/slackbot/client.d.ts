@@ -1,4 +1,5 @@
 import { type DownloadOptions } from '../../shared/download.js';
+import { type SlackCanvasChange, type SlackListCell, type SlackListCreateOptions, type SlackListFieldInput, type SlackListItem, type SlackListPage } from '../slack-api-types.js';
 import { type SlackChannel, type SlackFile, type SlackMessage, type SlackUser } from './types.js';
 export declare class SlackBotClient {
     private client;
@@ -25,6 +26,35 @@ export declare class SlackBotClient {
         unfurl_media?: boolean;
         mrkdwn?: boolean;
     }): Promise<SlackMessage>;
+    pinMessage(channel: string, ts: string): Promise<void>;
+    unpinMessage(channel: string, ts: string): Promise<void>;
+    scheduleMessage(channel: string, text: string, postAt: number, threadTs?: string, options?: {
+        readonly blocks?: readonly unknown[];
+    }): Promise<{
+        readonly scheduledMessageId: string;
+        readonly channelId: string;
+        readonly postAt: number;
+    }>;
+    markRead(channel: string, ts: string): Promise<void>;
+    listListItems(listId: string, options?: {
+        readonly limit?: number;
+        readonly cursor?: string;
+    }): Promise<SlackListPage>;
+    createListItem(listId: string, initialFields: readonly SlackListFieldInput[]): Promise<SlackListItem>;
+    updateListItems(listId: string, cells: readonly SlackListCell[]): Promise<void>;
+    deleteListItem(listId: string, itemId: string): Promise<void>;
+    createList(name: string, options?: SlackListCreateOptions): Promise<{
+        readonly listId: string;
+    }>;
+    createCanvas(title: string, markdown: string, options?: {
+        readonly channelId?: string;
+    }): Promise<{
+        readonly canvasId: string;
+    }>;
+    editCanvas(canvasId: string, changes: readonly SlackCanvasChange[]): Promise<void>;
+    createChannelCanvas(channelId: string, markdown: string, title?: string): Promise<{
+        readonly canvasId: string;
+    }>;
     getConversationHistory(channel: string, options?: {
         limit?: number;
         cursor?: string;
