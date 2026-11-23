@@ -40,6 +40,8 @@ export type TelegramSendContent =
       readonly threadId?: string
       /** The text is Telegram HTML or MarkdownV2; TDLib turns it into formatting, and text it cannot parse is invalid_formatting. */
       readonly parseMode?: 'html' | 'markdownv2'
+      /** Unix timestamp for a scheduled send. */
+      readonly sendAt?: number
     }
   | {
       readonly kind: 'image' | 'audio' | 'voice' | 'video' | 'file'
@@ -95,6 +97,15 @@ export interface TelegramAccountClient {
     chatId: string,
     content: TelegramSendContent,
   ): Promise<{ readonly messageId: string; readonly botMessageId?: string }>
+  markRead(chatId: string, messageIds: readonly string[]): Promise<void>
+  pin(chatId: string, messageId: string, options?: { readonly silent?: boolean }): Promise<void>
+  unpin(chatId: string, messageId: string): Promise<void>
+  edit(chatId: string, messageId: string, text: string, parseMode?: 'html' | 'markdownv2'): Promise<void>
+  remove(chatId: string, messageIds: readonly string[], options?: { readonly revoke?: boolean }): Promise<void>
+  setDraft(chatId: string, text: string | undefined): Promise<void>
+  search(chatId: string, query: string, limit: number): Promise<readonly TelegramAccountMessage[]>
+  markUnread(chatId: string, unread: boolean): Promise<void>
+  typing(chatId: string, threadId?: string): Promise<void>
   close(): Promise<void>
 }
 
@@ -106,6 +117,7 @@ export type TelegramAccountErrorCode =
   | 'media_too_large'
   | 'download_failed'
   | 'history_unavailable'
+  | 'action_failed'
   | 'not_sent'
   | 'invalid_formatting'
   | 'unknown'

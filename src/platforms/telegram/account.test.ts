@@ -1163,6 +1163,162 @@ describe('history, sends and downloads', () => {
     }
   })
 
+  it('returns a scheduled send from the request reply without waiting for delivery', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'sendMessage') fake.reply(id, request, { '@type': 'message', id: 71 })
+    }
+
+    const result = await client.send('33', { kind: 'text', text: 'later', sendAt: 1900000000 })
+
+    expect(result).toEqual({ messageId: '71' })
+    expect(fake.sent.at(-1)?.request).toEqual(
+      expect.objectContaining({
+        '@type': 'sendMessage',
+        chat_id: '33',
+        options: {
+          '@type': 'messageSendOptions',
+          scheduling_state: {
+            '@type': 'messageSchedulingStateSendAtDate',
+            send_date: 1900000000,
+            repeat_period: 0,
+          },
+        },
+      }),
+    )
+  })
+
+  it('sends exact read, pin, edit, delete, draft, unread, and typing requests', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => fake.reply(id, request, { '@type': 'ok' })
+
+    await client.markRead('33', ['10', '11'])
+    await client.pin('33', '10', { silent: true })
+    await client.unpin('33', '10')
+    await client.edit('33', '10', 'updated')
+    await client.remove('33', ['10', '11'], { revoke: true })
+    await client.setDraft('33', 'draft')
+    await client.setDraft('33', undefined)
+    await client.markUnread('33', true)
+    await client.typing('33', 'forum:7')
+
+    expect(fake.sent.slice(-9).map(({ request: { '@extra': _extra, ...request } }) => request)).toEqual([
+      { '@type': 'viewMessages', chat_id: '33', message_ids: ['10', '11'], source: null, force_read: true },
+      {
+        '@type': 'pinChatMessage',
+        chat_id: '33',
+        message_id: '10',
+        disable_notification: true,
+        only_for_self: false,
+      },
+      { '@type': 'unpinChatMessage', chat_id: '33', message_id: '10' },
+      {
+        '@type': 'editMessageText',
+        chat_id: '33',
+        message_id: '10',
+        reply_markup: null,
+        input_message_content: {
+          '@type': 'inputMessageText',
+          text: { '@type': 'formattedText', text: 'updated', entities: [] },
+          link_preview_options: null,
+          clear_draft: false,
+        },
+      },
+      { '@type': 'deleteMessages', chat_id: '33', message_ids: ['10', '11'], revoke: true },
+      {
+        '@type': 'setChatDraftMessage',
+        chat_id: '33',
+        topic_id: null,
+        draft_message: {
+          '@type': 'draftMessage',
+          reply_to: null,
+          date: 0,
+          content: {
+            '@type': 'draftMessageContentText',
+            text: { '@type': 'formattedText', text: 'draft', entities: [] },
+            link_preview_options: null,
+          },
+          effect_id: 0,
+          suggested_post_info: null,
+        },
+      },
+      { '@type': 'setChatDraftMessage', chat_id: '33', topic_id: null, draft_message: null },
+      { '@type': 'toggleChatIsMarkedAsUnread', chat_id: '33', is_marked_as_unread: true },
+      {
+        '@type': 'sendChatAction',
+        chat_id: '33',
+        topic_id: { '@type': 'messageTopicForum', forum_topic_id: 7 },
+        business_connection_id: '',
+        action: { '@type': 'chatActionTyping' },
+      },
+    ])
+  })
+
+  it('parses formatted edits and refuses invalid markup with invalid_formatting', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'parseTextEntities') {
+        if (request.text === 'bad') fake.reply(id, request, { '@type': 'error', code: 400, message: 'parse failed' })
+        else
+          fake.reply(id, request, {
+            '@type': 'formattedText',
+            text: 'bold',
+            entities: [{ '@type': 'textEntity', offset: 0, length: 4, type: { '@type': 'textEntityTypeBold' } }],
+          })
+      }
+      if (request['@type'] === 'editMessageText') fake.reply(id, request, { '@type': 'message', id: 10 })
+    }
+
+    await client.edit('33', '10', '<b>bold</b>', 'html')
+    expect(fake.sent.at(-1)?.request.input_message_content.text.text).toBe('bold')
+    await expect(client.edit('33', '10', 'bad', 'markdownv2')).rejects.toMatchObject({
+      code: 'invalid_formatting',
+    })
+  })
+
+  it('searches one chat and parses account messages', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) => {
+      if (request['@type'] === 'searchChatMessages')
+        fake.reply(id, request, {
+          '@type': 'foundChatMessages',
+          total_count: 1,
+          messages: [message({ '@type': 'messageText', text: { text: 'found', entities: [] } }, 12)],
+          next_from_message_id: 0,
+        })
+      if (request['@type'] === 'getChat')
+        fake.reply(id, request, { '@type': 'chat', type: { '@type': 'chatTypeBasicGroup' } })
+    }
+
+    const results = await client.search('33', 'needle', 25)
+
+    expect(results.map((item) => [item.messageId, item.text])).toEqual([['12', 'found']])
+    const searchRequest = fake.sent.find(({ request }) => request['@type'] === 'searchChatMessages')?.request
+    const { '@extra': _extra, ...request } = searchRequest ?? {}
+    expect(request).toEqual({
+      '@type': 'searchChatMessages',
+      chat_id: '33',
+      topic_id: null,
+      query: 'needle',
+      sender_id: null,
+      from_message_id: 0,
+      offset: 0,
+      limit: 25,
+      filter: null,
+    })
+  })
+
+  it('surfaces action refusals as typed and pre-dispatch', async () => {
+    const { client, fake } = await started()
+    fake.onSend = (id, request) =>
+      fake.reply(id, request, { '@type': 'error', code: 400, message: 'CHAT_WRITE_FORBIDDEN' })
+
+    await expect(client.pin('33', '10')).rejects.toMatchObject({
+      code: 'action_failed',
+      requestRefused: true,
+    })
+  })
+
   it('refuses a downloaded size mismatch', async () => {
     const { client, fake, dir } = await started()
     const path = join(dir, 'short.bin')
