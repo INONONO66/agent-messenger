@@ -140,7 +140,11 @@ function confirmed(confirmation: TdEvent): { readonly messageId: string; readonl
     const error = z.object({ message: z.string(), code: z.number() }).safeParse(confirmation.error)
     throw new TelegramAccountError(error.success ? error.data.message : 'TDLib send failed', 'not_sent')
   }
-  const message = z.object({ id: Id }).safeParse(confirmation.message)
+  return sentMessage(confirmation.message)
+}
+
+function sentMessage(value: unknown): { readonly messageId: string; readonly botMessageId?: string } {
+  const message = z.object({ id: Id }).safeParse(value)
   if (!message.success) throw new TelegramAccountError('Invalid send confirmation', 'unknown')
   const bot = botMessageId(message.data.id)
   return { messageId: String(message.data.id), ...(bot && { botMessageId: bot }) }
@@ -382,13 +386,22 @@ class AccountClient implements TelegramAccountClient {
     return undefined
   }
 
-  private async call(query: TdQuery, code: TelegramAccountErrorCode, signal?: AbortSignal): Promise<TdEvent> {
+  private async call(
+    query: TdQuery,
+    code: TelegramAccountErrorCode,
+    signal?: AbortSignal,
+    requestRefused = false,
+  ): Promise<TdEvent> {
     if (!this.receiver || this.clientId === undefined)
       throw new TelegramAccountError('Client is not started', 'session_lost')
     try {
       const event = await this.receiver.request(this.clientId, query, 15000, signal)
       if (event['@type'] === 'error')
-        throw failure(event, query['@type'] === 'sendMessage' ? 'not_sent' : code, query['@type'] === 'sendMessage')
+        throw failure(
+          event,
+          query['@type'] === 'sendMessage' ? 'not_sent' : code,
+          query['@type'] === 'sendMessage' || requestRefused,
+        )
       return event
     } catch (error) {
       if (error instanceof TelegramAccountError) throw error
@@ -565,18 +578,27 @@ class AccountClient implements TelegramAccountClient {
       },
       'history_unavailable',
     )
+    const messages = await this.parseMessagePage(chatId, result, 'history_unavailable')
+    const oldest = messages.at(-1)
+    return { messages, ...(oldest && { before: oldest.messageId }) }
+  }
+
+  private async parseMessagePage(
+    chatId: string,
+    result: TdEvent,
+    code: TelegramAccountErrorCode,
+  ): Promise<TelegramAccountMessage[]> {
     const page = z.object({ messages: z.array(AccountMessageSchema) }).safeParse(result)
-    if (!page.success) throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable')
+    if (!page.success) throw new TelegramAccountError('Malformed TDLib message page', code)
     const chatType = await this.chatType(chatId)
     const messages: TelegramAccountMessage[] = []
     for (const raw of page.data.messages) {
       const parsed = await this.parseMessage(raw, chatType)
-      if (!parsed) throw new TelegramAccountError('Malformed TDLib history message', 'history_unavailable')
+      if (!parsed) throw new TelegramAccountError('Malformed TDLib message page', code)
       messages.push(parsed)
       for (const item of parsed.media) this.media.set(item.fileId, item)
     }
-    const oldest = messages.at(-1)
-    return { messages, ...(oldest && { before: oldest.messageId }) }
+    return messages
   }
 
   async download(fileId: number, options: { readonly signal: AbortSignal }) {
@@ -676,6 +698,144 @@ class AccountClient implements TelegramAccountClient {
     }
   }
 
+  async markRead(chatId: string, messageIds: readonly string[]): Promise<void> {
+    await this.call(
+      { '@type': 'viewMessages', chat_id: chatId, message_ids: messageIds, source: null, force_read: true },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async pin(chatId: string, messageId: string, options?: { readonly silent?: boolean }): Promise<void> {
+    await this.call(
+      {
+        '@type': 'pinChatMessage',
+        chat_id: chatId,
+        message_id: messageId,
+        disable_notification: options?.silent ?? false,
+        only_for_self: false,
+      },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async unpin(chatId: string, messageId: string): Promise<void> {
+    await this.call(
+      { '@type': 'unpinChatMessage', chat_id: chatId, message_id: messageId },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async edit(chatId: string, messageId: string, text: string, parseMode?: 'html' | 'markdownv2'): Promise<void> {
+    const formatted = parseMode
+      ? await this.formattedText(text, parseMode)
+      : { '@type': 'formattedText' as const, text, entities: [] }
+    await this.call(
+      {
+        '@type': 'editMessageText',
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: null,
+        input_message_content: {
+          '@type': 'inputMessageText',
+          text: formatted,
+          link_preview_options: null,
+          clear_draft: false,
+        },
+      },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async remove(chatId: string, messageIds: readonly string[], options?: { readonly revoke?: boolean }): Promise<void> {
+    await this.call(
+      { '@type': 'deleteMessages', chat_id: chatId, message_ids: messageIds, revoke: options?.revoke ?? false },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async setDraft(chatId: string, text: string | undefined): Promise<void> {
+    const draft_message =
+      text === undefined
+        ? null
+        : {
+            '@type': 'draftMessage',
+            reply_to: null,
+            date: 0,
+            content: {
+              '@type': 'draftMessageContentText',
+              text: { '@type': 'formattedText', text, entities: [] },
+              link_preview_options: null,
+            },
+            effect_id: 0,
+            suggested_post_info: null,
+          }
+    await this.call(
+      { '@type': 'setChatDraftMessage', chat_id: chatId, topic_id: null, draft_message },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async search(chatId: string, query: string, limit: number): Promise<readonly TelegramAccountMessage[]> {
+    if (!this.ready || this.terminal) throw new TelegramAccountError('Account is not ready', 'session_lost')
+    const result = await this.call(
+      {
+        '@type': 'searchChatMessages',
+        chat_id: chatId,
+        topic_id: null,
+        query,
+        sender_id: null,
+        from_message_id: 0,
+        offset: 0,
+        limit,
+        filter: null,
+      },
+      'history_unavailable',
+    )
+    return this.parseMessagePage(chatId, result, 'history_unavailable')
+  }
+
+  async markUnread(chatId: string, unread: boolean): Promise<void> {
+    await this.call(
+      { '@type': 'toggleChatIsMarkedAsUnread', chat_id: chatId, is_marked_as_unread: unread },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
+  async typing(chatId: string, threadId?: string): Promise<void> {
+    let topic_id: ReturnType<typeof sendTopic>
+    try {
+      topic_id = sendTopic(threadId)
+    } catch {
+      throw new TelegramAccountError('Invalid Telegram thread identifier', 'action_failed', true)
+    }
+    await this.call(
+      {
+        '@type': 'sendChatAction',
+        chat_id: chatId,
+        topic_id,
+        business_connection_id: '',
+        action: { '@type': 'chatActionTyping' },
+      },
+      'action_failed',
+      undefined,
+      true,
+    )
+  }
+
   private async formattedText(text: string, mode: 'html' | 'markdownv2'): Promise<z.infer<typeof Caption>> {
     const parse_mode =
       mode === 'html' ? { '@type': 'textParseModeHTML' } : { '@type': 'textParseModeMarkdown', version: 2 }
@@ -699,10 +859,28 @@ class AccountClient implements TelegramAccountClient {
         ? await this.formattedText(content.text, content.parseMode)
         : undefined
     const input_message_content = inputContent(content, stagedPath, formatted)
+    const options =
+      content.kind === 'text' && content.sendAt !== undefined
+        ? {
+            '@type': 'messageSendOptions',
+            scheduling_state: {
+              '@type': 'messageSchedulingStateSendAtDate',
+              send_date: content.sendAt,
+              repeat_period: 0,
+            },
+          }
+        : undefined
     let reply: TdEvent
     try {
       reply = await this.call(
-        { '@type': 'sendMessage', chat_id: chatId, reply_to, topic_id, input_message_content },
+        {
+          '@type': 'sendMessage',
+          chat_id: chatId,
+          reply_to,
+          topic_id,
+          ...(options === undefined ? {} : { options }),
+          input_message_content,
+        },
         'unknown',
       )
     } catch (error) {
@@ -711,6 +889,7 @@ class AccountClient implements TelegramAccountClient {
     }
     const pending = z.object({ id: Id }).safeParse(reply)
     if (!pending.success) throw new TelegramAccountError('Missing temporary send id', 'unknown')
+    if (content.kind === 'text' && content.sendAt !== undefined) return sentMessage(reply)
     if (this.terminal) throw new TelegramAccountError('Account closed before send confirmation', 'unknown')
     const key = sendKey(chatId, pending.data.id)
     const confirmation = this.sent.get(key) ?? (await this.awaitConfirmation(key))

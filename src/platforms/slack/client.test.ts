@@ -2545,4 +2545,110 @@ describe('SlackClient extended methods', () => {
       await expect(client.updateUsergroupMembers('S001', [])).rejects.toThrow(SlackError)
     })
   })
+
+  describe('Slack Lists and Canvas methods', () => {
+    it('sends exact List requests and maps compact results', async () => {
+      const { client, mock } = await makeClient()
+      mock.apiCall.mockImplementation((method: string) => {
+        if (method === 'slackLists.items.list')
+          return Promise.resolve({
+            ok: true,
+            items: [{ id: 'Rec1', list_id: 'F1', fields: [{ key: 'title', column_id: 'Col1', text: 'Task' }] }],
+            response_metadata: { next_cursor: 'next' },
+          })
+        if (method === 'slackLists.items.create')
+          return Promise.resolve({
+            ok: true,
+            item: { id: 'Rec2', list_id: 'F1', fields: [{ key: 'title', column_id: 'Col1', text: 'New' }] },
+          })
+        if (method === 'slackLists.create') return Promise.resolve({ ok: true, list_id: 'F1' })
+        return Promise.resolve({ ok: true })
+      })
+      const field = { column_id: 'Col1', select: ['open'] }
+      const cell = { row_id: 'Rec1', ...field }
+
+      const page = await client.listListItems('F1', { limit: 10, cursor: 'cursor' })
+      const item = await client.createListItem('F1', [field])
+      await client.updateListItems('F1', [cell])
+      await client.deleteListItem('F1', 'Rec1')
+      const list = await client.createList('Tasks', { todoMode: true })
+
+      expect(page.nextCursor).toBe('next')
+      expect(page.items[0]?.fields[0]).toEqual({ key: 'title', columnId: 'Col1', text: 'Task' })
+      expect(item.id).toBe('Rec2')
+      expect(list).toEqual({ listId: 'F1' })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(1, 'slackLists.items.list', {
+        list_id: 'F1',
+        limit: 10,
+        cursor: 'cursor',
+      })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(2, 'slackLists.items.create', {
+        list_id: 'F1',
+        initial_fields: [field],
+      })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(3, 'slackLists.items.update', { list_id: 'F1', cells: [cell] })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(4, 'slackLists.items.delete', { list_id: 'F1', id: 'Rec1' })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(5, 'slackLists.create', {
+        name: 'Tasks',
+        description_blocks: undefined,
+        schema: undefined,
+        copy_from_list_id: undefined,
+        include_copied_list_records: undefined,
+        todo_mode: true,
+      })
+    })
+
+    it('sends exact Canvas requests and maps ids', async () => {
+      const { client, mock } = await makeClient()
+      mock.apiCall.mockImplementation((method: string) =>
+        Promise.resolve({
+          ok: true,
+          ...(method === 'canvases.create' || method === 'conversations.canvases.create'
+            ? { canvas_id: 'Canvas1' }
+            : {}),
+        }),
+      )
+      const changes = [
+        {
+          operation: 'replace' as const,
+          document_content: { type: 'markdown' as const, markdown: '# Updated' },
+        },
+      ]
+
+      expect(await client.createCanvas('Plan', '# Plan', { channelId: 'C1' })).toEqual({ canvasId: 'Canvas1' })
+      await client.editCanvas('Canvas1', changes)
+      expect(await client.createChannelCanvas('C1', '# Home', 'Home')).toEqual({ canvasId: 'Canvas1' })
+
+      expect(mock.apiCall).toHaveBeenNthCalledWith(1, 'canvases.create', {
+        title: 'Plan',
+        document_content: { type: 'markdown', markdown: '# Plan' },
+        channel_id: 'C1',
+      })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(2, 'canvases.edit', { canvas_id: 'Canvas1', changes })
+      expect(mock.apiCall).toHaveBeenNthCalledWith(3, 'conversations.canvases.create', {
+        channel_id: 'C1',
+        document_content: { type: 'markdown', markdown: '# Home' },
+        title: 'Home',
+      })
+    })
+
+    it('surfaces typed List and Canvas refusals', async () => {
+      const { client, mock } = await makeClient()
+      mock.apiCall.mockResolvedValue({ ok: false, error: 'list_not_found' })
+      await expect(client.listListItems('missing')).rejects.toMatchObject({
+        name: 'SlackError',
+        code: 'list_not_found',
+      })
+
+      mock.apiCall.mockResolvedValue({ ok: false, error: 'canvas_not_found' })
+      await expect(
+        client.editCanvas('missing', [
+          {
+            operation: 'delete',
+            section_id: 'section',
+          },
+        ]),
+      ).rejects.toMatchObject({ name: 'SlackError', code: 'canvas_not_found' })
+    })
+  })
 })

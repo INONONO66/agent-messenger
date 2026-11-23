@@ -568,6 +568,34 @@ export class TelegramBotClient {
     return this.call<boolean>('deleteMessage', { chat_id: chatId, message_id: messageId })
   }
 
+  async pinChatMessage(
+    chatId: ChatId,
+    messageId: number,
+    options?: { readonly disable_notification?: boolean },
+  ): Promise<boolean> {
+    return this.call<boolean>('pinChatMessage', { chat_id: chatId, message_id: messageId, ...options })
+  }
+
+  async unpinChatMessage(chatId: ChatId, messageId?: number): Promise<boolean> {
+    return this.call<boolean>('unpinChatMessage', {
+      chat_id: chatId,
+      ...(messageId === undefined ? {} : { message_id: messageId }),
+    })
+  }
+
+  async sendPoll(
+    chatId: ChatId,
+    question: string,
+    options: readonly string[],
+    extra?: {
+      readonly is_anonymous?: boolean
+      readonly allows_multiple_answers?: boolean
+      readonly message_thread_id?: number
+    },
+  ): Promise<TelegramMessage> {
+    return this.call<TelegramMessage>('sendPoll', { chat_id: chatId, question, options, ...extra })
+  }
+
   async setMessageReaction(
     chatId: ChatId,
     messageId: number,

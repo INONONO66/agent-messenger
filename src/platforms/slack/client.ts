@@ -1,6 +1,15 @@
 import { WebClient } from '@slack/web-api'
 
 import {
+  mapSlackListItem,
+  type SlackCanvasChange,
+  type SlackListCell,
+  type SlackListCreateOptions,
+  type SlackListFieldInput,
+  type SlackListItem,
+  type SlackListPage,
+} from '../slack-api-types'
+import {
   mapBookmark,
   mapChannel,
   mapDM,
@@ -1073,6 +1082,107 @@ export class SlackClient {
       })
       this.checkResponse(response)
       return mapUsergroup((response as any).usergroup)
+    })
+  }
+
+  async listListItems(
+    listId: string,
+    options?: { readonly limit?: number; readonly cursor?: string },
+  ): Promise<SlackListPage> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('slackLists.items.list', {
+        list_id: listId,
+        limit: options?.limit,
+        cursor: options?.cursor,
+      })
+      this.checkResponse(response)
+      const items = Array.isArray(response.items) ? response.items.map(mapSlackListItem) : []
+      const metadata = response.response_metadata
+      const nextCursor =
+        metadata && typeof metadata === 'object' && 'next_cursor' in metadata ? metadata.next_cursor : undefined
+      return {
+        items,
+        ...(typeof nextCursor === 'string' && nextCursor !== '' ? { nextCursor } : {}),
+      }
+    })
+  }
+
+  async createListItem(listId: string, initialFields: readonly SlackListFieldInput[]): Promise<SlackListItem> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('slackLists.items.create', {
+        list_id: listId,
+        initial_fields: initialFields,
+      })
+      this.checkResponse(response)
+      return mapSlackListItem(response.item)
+    })
+  }
+
+  async updateListItems(listId: string, cells: readonly SlackListCell[]): Promise<void> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('slackLists.items.update', { list_id: listId, cells })
+      this.checkResponse(response)
+    })
+  }
+
+  async deleteListItem(listId: string, itemId: string): Promise<void> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('slackLists.items.delete', { list_id: listId, id: itemId })
+      this.checkResponse(response)
+    })
+  }
+
+  async createList(name: string, options: SlackListCreateOptions = {}): Promise<{ readonly listId: string }> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('slackLists.create', {
+        name,
+        description_blocks: options.descriptionBlocks,
+        schema: options.schema,
+        copy_from_list_id: options.copyFromListId,
+        include_copied_list_records: options.includeCopiedListRecords,
+        todo_mode: options.todoMode,
+      })
+      this.checkResponse(response)
+      return { listId: String(response.list_id) }
+    })
+  }
+
+  async createCanvas(
+    title: string,
+    markdown: string,
+    options?: { readonly channelId?: string },
+  ): Promise<{ readonly canvasId: string }> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('canvases.create', {
+        title,
+        document_content: { type: 'markdown', markdown },
+        channel_id: options?.channelId,
+      })
+      this.checkResponse(response)
+      return { canvasId: String(response.canvas_id) }
+    })
+  }
+
+  async editCanvas(canvasId: string, changes: readonly SlackCanvasChange[]): Promise<void> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('canvases.edit', { canvas_id: canvasId, changes })
+      this.checkResponse(response)
+    })
+  }
+
+  async createChannelCanvas(
+    channelId: string,
+    markdown: string,
+    title?: string,
+  ): Promise<{ readonly canvasId: string }> {
+    return this.withRetry(async () => {
+      const response = await this.ensureAuth().apiCall('conversations.canvases.create', {
+        channel_id: channelId,
+        document_content: { type: 'markdown', markdown },
+        title,
+      })
+      this.checkResponse(response)
+      return { canvasId: String(response.canvas_id) }
     })
   }
 }

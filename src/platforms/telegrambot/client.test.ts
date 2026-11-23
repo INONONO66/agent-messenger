@@ -209,6 +209,66 @@ describe('TelegramBotClient', () => {
     })
   })
 
+  describe('pin and poll actions', () => {
+    it('sends exact pin, unpin, and poll requests', async () => {
+      mockOk(true)
+      mockOk(true)
+      mockOk({ message_id: 7, date: 1, chat: { id: -100, type: 'supergroup', title: 'Team' } })
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+
+      expect(await client.pinChatMessage(-100, 7, { disable_notification: true })).toBe(true)
+      expect(await client.unpinChatMessage(-100, 7)).toBe(true)
+      expect(
+        (
+          await client.sendPoll(-100, 'Choose', ['A', 'B'], {
+            is_anonymous: false,
+            allows_multiple_answers: true,
+            message_thread_id: 3,
+          })
+        ).message_id,
+      ).toBe(7)
+
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://api.telegram.org/botTOKEN/pinChatMessage',
+        'https://api.telegram.org/botTOKEN/unpinChatMessage',
+        'https://api.telegram.org/botTOKEN/sendPoll',
+      ])
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({
+        chat_id: -100,
+        message_id: 7,
+        disable_notification: true,
+      })
+      expect(JSON.parse(fetchCalls[1].options?.body as string)).toEqual({ chat_id: -100, message_id: 7 })
+      expect(JSON.parse(fetchCalls[2].options?.body as string)).toEqual({
+        chat_id: -100,
+        question: 'Choose',
+        options: ['A', 'B'],
+        is_anonymous: false,
+        allows_multiple_answers: true,
+        message_thread_id: 3,
+      })
+    })
+
+    it('omits message_id when unpinning all messages', async () => {
+      mockOk(true)
+      const client = await new TelegramBotClient().login({ token: 'TOKEN' })
+
+      await client.unpinChatMessage(-100)
+
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({ chat_id: -100 })
+    })
+
+    it('surfaces Bot API refusals as typed errors', async () => {
+      mockApiError(400, 'Bad Request: message to pin not found')
+      const client = await new TelegramBotClient({ retries: 0 }).login({ token: 'TOKEN' })
+
+      await expect(client.pinChatMessage(-100, 999)).rejects.toMatchObject({
+        name: 'TelegramBotError',
+        code: 'bad_request',
+      })
+    })
+  })
+
   describe('resolveChatId', () => {
     it('returns numeric input as number', async () => {
       const client = new TelegramBotClient()
