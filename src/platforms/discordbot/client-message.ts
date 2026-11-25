@@ -42,6 +42,7 @@ export async function createMessage(
   if (options.content !== undefined) payload.content = options.content
   if (options.reply_to !== undefined)
     payload.message_reference = { message_id: options.reply_to, fail_if_not_exists: false }
+  if (options.components !== undefined) payload.components = options.components
 
   if (files.length === 0) return request<DiscordMessage>('POST', `/channels/${target}/messages`, payload)
 

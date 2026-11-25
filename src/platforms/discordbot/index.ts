@@ -6,8 +6,10 @@ export { joinVoice, DiscordVoiceError } from './voice'
 export type { DiscordVoiceHandle, DiscordVoiceErrorCode } from './voice'
 export type { DiscordBotListenerOptions } from './listener'
 export type {
+  DiscordActionRow,
   DiscordAttachmentInput,
   DiscordBotConfig,
+  DiscordButton,
   DiscordBotCredentials,
   DiscordBotEntry,
   DiscordCreateMessageOptions,

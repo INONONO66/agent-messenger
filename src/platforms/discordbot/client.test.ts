@@ -850,6 +850,20 @@ describe('DiscordBotClient', () => {
         message_reference: { message_id: 'orig', fail_if_not_exists: false },
       })
     })
+
+    it('sends buttons as components', async () => {
+      mockResponse({ id: 'msg1', channel_id: 'ch1', content: 'pick' })
+      const client = await new DiscordBotClient().login({ token: 'bot-token' })
+      const row = {
+        type: 1 as const,
+        components: [
+          { type: 2 as const, style: 1 as const, label: 'ok', custom_id: '/ok d1' },
+          { type: 2 as const, style: 2 as const, label: 'no', custom_id: '/no d1' },
+        ],
+      }
+      await client.createMessage('ch1', { content: 'pick', components: [row] })
+      expect(JSON.parse(fetchCalls[0].options?.body as string)).toEqual({ content: 'pick', components: [row] })
+    })
   })
 
   describe('retry logic', () => {
