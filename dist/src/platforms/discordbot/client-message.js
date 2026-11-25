@@ -27,6 +27,8 @@ export async function createMessage(request, requestFormData, channelId, options
         payload.content = options.content;
     if (options.reply_to !== undefined)
         payload.message_reference = { message_id: options.reply_to, fail_if_not_exists: false };
+    if (options.components !== undefined)
+        payload.components = options.components;
     if (files.length === 0)
         return request('POST', `/channels/${target}/messages`, payload);
     const formData = new FormData();

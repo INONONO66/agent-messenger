@@ -83,11 +83,24 @@ export type DiscordAttachmentInput = {
 } | (DiscordFileData & {
     path?: never;
 });
+/** A button; a press arrives as `INTERACTION_CREATE` with `data.custom_id`. Style 1 is primary, 2 secondary, 3 success, 4 danger. */
+export interface DiscordButton {
+    type: 2;
+    style: 1 | 2 | 3 | 4;
+    label: string;
+    custom_id: string;
+}
+/** One row of up to five buttons under a message. */
+export interface DiscordActionRow {
+    type: 1;
+    components: DiscordButton[];
+}
 export interface DiscordCreateMessageOptions {
     content?: string;
     files?: DiscordAttachmentInput[];
     reply_to?: string;
     thread_id?: string;
+    components?: DiscordActionRow[];
 }
 export interface DiscordThreadListResult {
     threads: DiscordChannel[];
